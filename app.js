@@ -20,6 +20,31 @@ const CONFIG = {
   LOCAL_QUEUE_KEY:  "omior_scan_queue_v1",
 };
 
+// ── CONFIG addition ──
+const CONFIG = {
+  // ...existing...
+  SCAN_COOLDOWN_MS: 5 * 60 * 1000, // don't re-record same person+type within 5 min
+  LOCAL_COOLDOWN_KEY: "omior_scan_cooldowns_v1",
+};
+
+// ── State addition ──
+let scanCooldowns = loadCooldowns(); // { "name|scanType": timestampMs }
+
+function loadCooldowns() {
+  try { return JSON.parse(localStorage.getItem(CONFIG.LOCAL_COOLDOWN_KEY) || "{}"); }
+  catch { return {}; }
+}
+function saveCooldowns() {
+  localStorage.setItem(CONFIG.LOCAL_COOLDOWN_KEY, JSON.stringify(scanCooldowns));
+}
+function pruneCooldowns() {
+  const cutoff = Date.now() - CONFIG.SCAN_COOLDOWN_MS;
+  for (const k in scanCooldowns) {
+    if (scanCooldowns[k] < cutoff) delete scanCooldowns[k];
+  }
+}
+
+
 // ── State ──────────────────────────────────────────────────────
 let roster = [];              // [{name, embeddings:[Float32Array,...]}]
 let armedOverride = null;     // "lunch_out" | "lunch_in" | "hd_entry" | "hd_exit" | null
@@ -191,25 +216,45 @@ function confirmMatch(name, distance) {
   lastConfirmedAt = Date.now();
   setCamState("match");
 
-  const scanType = inferScanType();
-  const now = new Date();
-  const timeStr = now.toLocaleTimeString("en-GB", { hour12: false });
+  const scanType   = inferScanType();
+  const now        = new Date();
+  const timeStr    = now.toLocaleTimeString("en-GB", { hour12: false });
+  const cooldownKey = name + "|" + mapScanTypeForApi(scanType);
+
+  pruneCooldowns();
+  const lastScanAt = scanCooldowns[cooldownKey] || 0;
+  const onCooldown  = (Date.now() - lastScanAt) < CONFIG.SCAN_COOLDOWN_MS;
 
   $("resultName").textContent = name;
-  $("resultMeta").innerHTML = `<b>⏰ ${timeStr}</b> &nbsp;·&nbsp; ${scanTypeLabel(scanType)}`;
+
   const actionEl = $("resultAction");
-  actionEl.textContent = "✓ Recorded";
-  actionEl.style.background = "var(--green-dim)";
-  actionEl.style.color = "var(--green)";
+
+  if (onCooldown) {
+    // Face still in frame / re-detected too soon — do NOT resubmit
+    const secsAgo = Math.round((Date.now() - lastScanAt) / 1000);
+    $("resultMeta").innerHTML = `<b>⏰ ${timeStr}</b> &nbsp;·&nbsp; ${scanTypeLabel(scanType)}`;
+    actionEl.textContent = "Already recorded " + secsAgo + "s ago";
+    actionEl.style.background = "var(--amber-dim)";
+    actionEl.style.color = "var(--amber)";
+    setStatusText("Already recorded — step back from camera");
+  } else {
+    $("resultMeta").innerHTML = `<b>⏰ ${timeStr}</b> &nbsp;·&nbsp; ${scanTypeLabel(scanType)}`;
+    actionEl.textContent = "✓ Recorded";
+    actionEl.style.background = "var(--green-dim)";
+    actionEl.style.color = "var(--green)";
+    setStatusText("Matched");
+
+    queueScan({
+      name,
+      scanType: mapScanTypeForApi(scanType),
+      timestamp: now.toISOString(),
+    });
+
+    scanCooldowns[cooldownKey] = Date.now();
+    saveCooldowns();
+  }
+
   $("resultCard").classList.add("show");
-  setStatusText("Matched");
-
-  queueScan({
-    name,
-    scanType: mapScanTypeForApi(scanType),
-    timestamp: now.toISOString(),
-  });
-
   disarmOverride();
   scheduleReset();
 }
@@ -238,8 +283,11 @@ function scheduleReset() {
 }
 
 function mapScanTypeForApi(type) {
-  // "ot" maps directly; others already match backend SCAN_TYPE values
-  return type === "ot" ? "ot" : type.replace("_", "_"); // lunch_out/lunch_in/hd_entry/hd_exit
+  // Backend only distinguishes: ot, lunch, hd_entry, hd_exit.
+  // Lunch direction (out vs in) is inferred server-side from whether
+  // it's the person's 1st or 2nd lunch scan today — same as QR flow.
+  if (type === "lunch_out" || type === "lunch_in") return "lunch";
+  return type; // ot, hd_entry, hd_exit pass through unchanged
 }
 
 function setCamState(state) {
