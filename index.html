@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>OMIOR — Gate Scan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:            #0a0e14;
+    --panel:         #10161f;
+    --panel-line:    rgba(255,255,255,0.07);
+    --text:          #eef2f6;
+    --text-dim:      rgba(238,242,246,0.45);
+    --text-faint:    rgba(238,242,246,0.25);
+
+    --amber:         #d4af37;
+    --amber-dim:     rgba(212,175,55,0.18);
+    --cyan:          #4fd1e8;
+    --cyan-dim:      rgba(79,209,232,0.18);
+    --green:         #4ade80;
+    --green-dim:     rgba(74,222,128,0.16);
+    --red:           #f2555a;
+    --red-dim:       rgba(242,85,90,0.16);
+
+    --radius:        18px;
+    --radius-sm:     10px;
+  }
+
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{
+    margin:0; padding:0;
+    width:100%; height:100%;
+    background:var(--bg);
+    color:var(--text);
+    font-family:'Space Grotesk',Arial,sans-serif;
+    overflow:hidden;
+    overscroll-behavior:none;
+  }
+  .mono{ font-family:'JetBrains Mono',monospace; }
+
+  #app{
+    position:fixed; inset:0;
+    display:flex; flex-direction:column;
+    height:100dvh;
+  }
+
+  /* ── Top bar ─────────────────────────────────────────── */
+  #topbar{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 18px;
+    background:var(--panel);
+    border-bottom:1px solid var(--panel-line);
+    flex-shrink:0;
+    z-index:5;
+  }
+  .brand{
+    display:flex; align-items:center; gap:10px;
+  }
+  .brand-mark{
+    width:28px; height:28px; border-radius:8px;
+    background:linear-gradient(135deg,var(--amber),#f6d365);
+    display:flex; align-items:center; justify-content:center;
+    font-weight:700; font-size:13px; color:#1a1200;
+  }
+  .brand-name{
+    font-weight:700; font-size:14px; letter-spacing:1.5px; color:var(--amber);
+  }
+  .brand-sub{
+    font-size:9px; color:var(--text-faint); letter-spacing:1px; margin-top:1px;
+  }
+  #clock{
+    font-size:13px; color:var(--text-dim); letter-spacing:0.5px;
+  }
+  #conn{
+    display:flex; align-items:center; gap:5px; font-size:9px; color:var(--text-faint);
+    letter-spacing:0.5px; margin-top:2px; justify-content:flex-end;
+  }
+  #conn .dot{ width:6px; height:6px; border-radius:50%; background:var(--green); }
+  #conn.offline .dot{ background:var(--red); animation:blink 1.4s infinite; }
+  #conn.offline{ color:var(--red); }
+  @keyframes blink{ 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+  /* ── Camera stage ────────────────────────────────────── */
+  #stage{
+    position:relative;
+    flex:1;
+    display:flex; align-items:center; justify-content:center;
+    padding:22px;
+    min-height:0;
+  }
+  #camWrap{
+    position:relative;
+    width:100%; max-width:520px;
+    aspect-ratio:3/4;
+    border-radius:var(--radius);
+    overflow:hidden;
+    background:#000;
+    border:2px solid var(--panel-line);
+    transition:border-color 0.35s ease, box-shadow 0.35s ease;
+  }
+  #camWrap.state-idle{    border-color:var(--amber-dim); }
+  #camWrap.state-detect{  border-color:var(--cyan);   box-shadow:0 0 0 3px var(--cyan-dim), 0 0 40px -8px var(--cyan); }
+  #camWrap.state-match{   border-color:var(--green);  box-shadow:0 0 0 3px var(--green-dim), 0 0 40px -8px var(--green); }
+  #camWrap.state-unknown{ border-color:var(--red);    box-shadow:0 0 0 3px var(--red-dim), 0 0 40px -8px var(--red); }
+
+  video{
+    position:absolute; inset:0;
+    width:100%; height:100%;
+    object-fit:cover;
+    transform:scaleX(-1); /* mirror, feels natural at a gate */
+  }
+  canvas#overlay{
+    position:absolute; inset:0;
+    width:100%; height:100%;
+    transform:scaleX(-1);
+    pointer-events:none;
+  }
+
+  /* face guide ring, shown when idle/detecting */
+  #guideRing{
+    position:absolute; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    pointer-events:none;
+  }
+  #guideRing svg{ width:62%; opacity:0.35; }
+  #camWrap.state-match #guideRing, #camWrap.state-unknown #guideRing{ display:none; }
+
+  /* status pill floating on camera */
+  #statusPill{
+    position:absolute; top:14px; left:50%; transform:translateX(-50%);
+    padding:7px 16px;
+    border-radius:999px;
+    background:rgba(10,14,20,0.72);
+    backdrop-filter:blur(8px);
+    font-size:11px; font-weight:600; letter-spacing:0.8px;
+    color:var(--amber-);
+    border:1px solid var(--panel-line);
+    display:flex; align-items:center; gap:7px;
+    white-space:nowrap;
+  }
+  #statusPill .p-dot{ width:6px; height:6px; border-radius:50%; background:var(--amber); }
+  .state-detect  #statusPill .p-dot{ background:var(--cyan); animation:pulse 1s infinite; }
+  .state-match   #statusPill .p-dot{ background:var(--green); }
+  .state-unknown #statusPill .p-dot{ background:var(--red); }
+  @keyframes pulse{ 0%,100%{transform:scale(1); opacity:1;} 50%{transform:scale(1.6); opacity:0.5;} }
+
+  /* result card slides up over bottom of camera on match */
+  #resultCard{
+    position:absolute; left:0; right:0; bottom:0;
+    padding:20px 20px 24px;
+    background:linear-gradient(0deg, rgba(6,8,11,0.94) 0%, rgba(6,8,11,0.75) 70%, transparent 100%);
+    transform:translateY(100%);
+    transition:transform 0.4s cubic-bezier(.2,.9,.25,1);
+  }
+  #resultCard.show{ transform:translateY(0); }
+  #resultName{ font-size:26px; font-weight:700; line-height:1.15; margin-bottom:4px; }
+  #resultMeta{ font-size:12px; color:var(--text-dim); }
+  #resultMeta b{ color:inherit; font-weight:600; }
+  #resultAction{
+    display:inline-block; margin-top:9px;
+    padding:5px 12px; border-radius:7px;
+    font-size:11px; font-weight:600; letter-spacing:0.4px;
+  }
+
+  /* ── Override bar ────────────────────────────────────── */
+  #overrideBar{
+    flex-shrink:0;
+    padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+    background:var(--panel);
+    border-top:1px solid var(--panel-line);
+  }
+  #overrideLabel{
+    font-size:9px; letter-spacing:1.4px; text-transform:uppercase;
+    color:var(--text-faint); margin-bottom:9px; text-align:center;
+  }
+  #overrideGrid{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:8px;
+  }
+  .ovBtn{
+    appearance:none; border:1px solid var(--panel-line);
+    background:rgba(255,255,255,0.03);
+    color:var(--text);
+    border-radius:var(--radius-sm);
+    padding:12px 4px 10px;
+    display:flex; flex-direction:column; align-items:center; gap:5px;
+    font-family:inherit; font-size:10.5px; font-weight:600; letter-spacing:0.3px;
+    cursor:pointer;
+    transition:all 0.15s ease;
+  }
+  .ovBtn .ico{ font-size:18px; line-height:1; }
+  .ovBtn:active{ transform:scale(0.95); }
+  .ovBtn.active{
+    background:var(--amber-dim);
+    border-color:var(--amber);
+    color:var(--amber);
+  }
+  .ovBtn.active .ico{ filter:drop-shadow(0 0 6px var(--amber)); }
+
+  #armedNote{
+    text-align:center; font-size:10.5px; color:var(--amber);
+    margin-top:9px; min-height:14px; letter-spacing:0.3px;
+  }
+
+  /* ── Bottom utility row ──────────────────────────────── */
+  #utilRow{
+    display:flex; justify-content:center; gap:18px;
+    margin-top:10px;
+  }
+  .utilLink{
+    background:none; border:none; color:var(--text-faint);
+    font-family:inherit; font-size:10px; letter-spacing:0.5px;
+    cursor:pointer; padding:4px;
+  }
+  .utilLink:active{ color:var(--text-dim); }
+
+  /* ── Toast (offline queue / errors) ─────────────────── */
+  #toast{
+    position:fixed; left:50%; top:16px; transform:translate(-50%,-140%);
+    background:var(--panel); border:1px solid var(--panel-line);
+    padding:10px 16px; border-radius:10px;
+    font-size:11.5px; z-index:50;
+    transition:transform 0.3s ease;
+    max-width:88%; text-align:center;
+  }
+  #toast.show{ transform:translate(-50%,0); }
+
+  /* ── Enroll modal ─────────────────────────────────────── */
+  #enrollOverlay{
+    position:fixed; inset:0; z-index:40;
+    background:rgba(4,6,9,0.9);
+    backdrop-filter:blur(6px);
+    display:none;
+    align-items:flex-end; justify-content:center;
+  }
+  #enrollOverlay.show{ display:flex; }
+  #enrollSheet{
+    width:100%; max-width:520px;
+    background:var(--panel);
+    border-radius:20px 20px 0 0;
+    border:1px solid var(--panel-line); border-bottom:none;
+    padding:20px 20px calc(20px + env(safe-area-inset-bottom));
+    max-height:88vh; overflow-y:auto;
+  }
+  #enrollSheet h2{
+    margin:0 0 3px; font-size:17px; font-weight:700; color:var(--amber);
+  }
+  #enrollSheet .hint{ font-size:11.5px; color:var(--text-dim); margin-bottom:16px; }
+  #enrollSheet label{ font-size:10px; letter-spacing:0.8px; text-transform:uppercase; color:var(--text-faint); }
+  #enrollName{
+    width:100%; margin-top:6px; margin-bottom:16px;
+    background:rgba(255,255,255,0.04); border:1px solid var(--panel-line);
+    color:var(--text); font-family:inherit; font-size:15px;
+    padding:11px 12px; border-radius:10px;
+  }
+  #enrollCamWrap{
+    position:relative; width:100%; aspect-ratio:1/1; max-width:280px; margin:0 auto 14px;
+    border-radius:14px; overflow:hidden; background:#000;
+    border:2px solid var(--panel-line);
+  }
+  #enrollVideo{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+  #enrollProgress{
+    display:flex; gap:6px; justify-content:center; margin-bottom:14px;
+  }
+  .capDot{ width:9px; height:9px; border-radius:50%; background:rgba(255,255,255,0.12); border:1px solid var(--panel-line); }
+  .capDot.done{ background:var(--green); border-color:var(--green); }
+  #enrollActions{ display:flex; gap:10px; }
+  .btn{
+    flex:1; border:none; border-radius:12px; padding:13px;
+    font-family:inherit; font-weight:600; font-size:13px;
+    cursor:pointer;
+  }
+  .btn-primary{ background:var(--amber); color:#1a1200; }
+  .btn-ghost{ background:rgba(255,255,255,0.05); color:var(--text-dim); }
+  .btn:disabled{ opacity:0.4; }
+  #enrollStatus{ font-size:11.5px; text-align:center; margin-top:12px; min-height:16px; color:var(--text-dim); }
+
+  /* loading screen while models load */
+  #boot{
+    position:fixed; inset:0; z-index:60;
+    background:var(--bg); display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:14px;
+  }
+  #boot.hide{ display:none; }
+  .spinner{
+    width:34px; height:34px; border-radius:50%;
+    border:3px solid var(--panel-line); border-top-color:var(--amber);
+    animation:spin 0.9s linear infinite;
+  }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+  #bootMsg{ font-size:12px; color:var(--text-dim); letter-spacing:0.4px; }
+</style>
+</head>
+<body>
+
+<div id="boot">
+  <div class="spinner"></div>
+  <div id="bootMsg">Loading recognition models…</div>
+</div>
+
+<div id="app">
+
+  <div id="topbar">
+    <div class="brand">
+      <div class="brand-mark">O</div>
+      <div>
+        <div class="brand-name">OMIOR</div>
+        <div class="brand-sub">GATE SCAN</div>
+      </div>
+    </div>
+    <div>
+      <div id="clock" class="mono">--:--:--</div>
+      <div id="conn"><span class="dot"></span><span id="connText">online</span></div>
+    </div>
+  </div>
+
+  <div id="stage">
+    <div id="camWrap" class="state-idle">
+      <video id="video" autoplay muted playsinline></video>
+      <canvas id="overlay"></canvas>
+
+      <div id="guideRing">
+        <svg viewBox="0 0 200 240" fill="none">
+          <ellipse cx="100" cy="110" rx="78" ry="98" stroke="#d4af37" stroke-width="2.5" stroke-dasharray="6 8"/>
+        </svg>
+      </div>
+
+      <div id="statusPill"><span class="p-dot"></span><span id="statusText">Position your face in frame</span></div>
+
+      <div id="resultCard">
+        <div id="resultName">—</div>
+        <div id="resultMeta"></div>
+        <div id="resultAction"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="overrideBar">
+    <div id="overrideLabel">If this doesn't match login / logout — select before scanning</div>
+    <div id="overrideGrid">
+      <button class="ovBtn" data-type="lunch_out"><span class="ico">🍽️</span>Lunch Out</button>
+      <button class="ovBtn" data-type="lunch_in"><span class="ico">🔵</span>Lunch In</button>
+      <button class="ovBtn" data-type="hd_entry"><span class="ico">📋</span>Half Day In</button>
+      <button class="ovBtn" data-type="hd_exit"><span class="ico">📋</span>Half Day Out</button>
+    </div>
+    <div id="armedNote">&nbsp;</div>
+    <div id="utilRow">
+      <button class="utilLink" id="enrollLink">+ Enroll new staff</button>
+      <button class="utilLink" id="queueLink">Pending sync: <span id="queueCount">0</span></button>
+    </div>
+  </div>
+
+</div>
+
+<div id="toast"></div>
+
+<!-- ── Enroll modal ─────────────────────────────────────── -->
+<div id="enrollOverlay">
+  <div id="enrollSheet">
+    <h2>Enroll new staff</h2>
+    <div class="hint">Capture 5 photos at slightly different angles for reliable matching.</div>
+
+    <label for="enrollName">Staff name</label>
+    <input id="enrollName" type="text" placeholder="Exactly as in Person Name sheet" autocomplete="off">
+
+    <div id="enrollCamWrap">
+      <video id="enrollVideo" autoplay muted playsinline></video>
+    </div>
+
+    <div id="enrollProgress">
+      <div class="capDot" data-i="0"></div>
+      <div class="capDot" data-i="1"></div>
+      <div class="capDot" data-i="2"></div>
+      <div class="capDot" data-i="3"></div>
+      <div class="capDot" data-i="4"></div>
+    </div>
+
+    <div id="enrollActions">
+      <button class="btn btn-ghost" id="enrollCancel">Cancel</button>
+      <button class="btn btn-primary" id="enrollCapture">Capture photo</button>
+    </div>
+    <div id="enrollStatus">&nbsp;</div>
+  </div>
+</div>
+
+<!-- face-api.js — bundled recognition (detection + landmarks + 128d embedding) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/face-api.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
