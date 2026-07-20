@@ -5,7 +5,7 @@
 const CONFIG = {
   // Paste your deployed Apps Script Web App URL here (the one from
   // FaceKiosk_AppsScript.gs, NOT the existing attendance script).
-  API_URL: "https://script.google.com/macros/s/AKfycbzx1d3ibfzBuMiwBOmM2R6FKr61kiDiGeSZF2jsSIj55u5cu-xhVqVtyQRzfKZb8hGr1A/exec",
+  API_URL: "1QGr4psQIHkbWzskAxIQLvUAi7oQhVsyczixMex_1WHk",
 
   MODEL_URL: "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights",
 
@@ -301,10 +301,15 @@ async function flushQueue() {
         headers: { "Content-Type": "text/plain;charset=utf-8" }, // avoids CORS preflight on Apps Script
         body: JSON.stringify({ action: "scan", ...entry }),
       });
-      const data = await res.json();
+      const rawText = await res.text();
+      console.log("Scan POST response:", res.status, rawText);
+      let data;
+      try { data = JSON.parse(rawText); }
+      catch { throw new Error("Non-JSON response (status " + res.status + "): " + rawText.slice(0, 200)); }
       if (!data.ok) throw new Error(data.error || "scan write failed");
     } catch (err) {
       console.warn("Scan upload failed, will retry:", err.message);
+      showToast("Sync error: " + err.message);
       remaining.push(entry);
     }
   }
