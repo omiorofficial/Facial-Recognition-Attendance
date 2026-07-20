@@ -238,11 +238,8 @@ function scheduleReset() {
 }
 
 function mapScanTypeForApi(type) {
-  // Backend only distinguishes: ot, lunch, hd_entry, hd_exit.
-  // Lunch direction (out vs in) is inferred server-side from whether
-  // it's the person's 1st or 2nd lunch scan today — same as QR flow.
-  if (type === "lunch_out" || type === "lunch_in") return "lunch";
-  return type; // ot, hd_entry, hd_exit pass through unchanged
+  // "ot" maps directly; others already match backend SCAN_TYPE values
+  return type === "ot" ? "ot" : type.replace("_", "_"); // lunch_out/lunch_in/hd_entry/hd_exit
 }
 
 function setCamState(state) {
