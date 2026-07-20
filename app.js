@@ -21,7 +21,7 @@ const CONFIG = {
   // Lunch Out / Lunch In / Half Day buttons first. Starts counting from
   // the moment the camera first sees the face, not from when the staff
   // notices the screen — keep this generous.
-  PRE_SCAN_GRACE_MS: 10000,
+  PRE_SCAN_GRACE_MS: 5000,
 
   LOCAL_ROSTER_KEY: "omior_roster_cache_v1",
   LOCAL_QUEUE_KEY:  "omior_scan_queue_v1",
