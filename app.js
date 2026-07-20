@@ -21,7 +21,7 @@ const CONFIG = {
   // Lunch Out / Lunch In / Half Day buttons first. Starts counting from
   // the moment the camera first sees the face, not from when the staff
   // notices the screen — keep this generous.
-  PRE_SCAN_GRACE_MS: 5000,
+  PRE_SCAN_GRACE_MS: 6000,
 
   LOCAL_ROSTER_KEY: "omior_roster_cache_v1",
   LOCAL_QUEUE_KEY:  "omior_scan_queue_v1",
@@ -142,11 +142,20 @@ async function runDetection() {
   const video = $("video");
   if (video.readyState < 2) return;
 
+  // A result was just confirmed (e.g. via button click) — don't let an
+  // in-flight detection that resolves afterward touch the DOM and wipe
+  // the confirmed card early.
+  if (lastConfirmedAt !== 0 && Date.now() - lastConfirmedAt < CONFIG.CONFIRM_HOLD_MS) return;
+
   const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
   const detection = await faceapi
     .detectSingleFace(video, options)
     .withFaceLandmarks()
     .withFaceDescriptor();
+
+  // Re-check after the await — a confirm may have happened while this
+  // scan was running.
+  if (lastConfirmedAt !== 0 && Date.now() - lastConfirmedAt < CONFIG.CONFIRM_HOLD_MS) return;
 
   if (!detection) {
     // face left the frame — cancel any pending grace-period match
