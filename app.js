@@ -16,6 +16,11 @@ const CONFIG = {
   QUEUE_RETRY_MS: 15000,     // retry failed scan uploads every 15s
   ENROLL_SHOTS: 5,
 
+  // How long a recognized face is held on screen (unconfirmed) before we
+  // auto-log it as a normal login/logout. Gives staff time to tap
+  // Lunch Out / Lunch In / Half Day buttons first.
+  PRE_SCAN_GRACE_MS: 3000,
+
   LOCAL_ROSTER_KEY: "omior_roster_cache_v1",
   LOCAL_QUEUE_KEY:  "omior_scan_queue_v1",
 };
@@ -26,6 +31,7 @@ let armedOverride = null;     // "lunch_out" | "lunch_in" | "hd_entry" | "hd_exi
 let lastConfirmedAt = 0;
 let detecting = false;
 let stream = null;
+let pendingMatch = null;      // {name, distance, firstSeenAt} — face seen, waiting on grace period
 const recentSubmissions = {}; // name -> timestamp ms of last successful queue push
 
 const $ = (id) => document.getElementById(id);
@@ -141,20 +147,46 @@ async function runDetection() {
     .withFaceDescriptor();
 
   if (!detection) {
+    // face left the frame — cancel any pending grace-period match
+    pendingMatch = null;
     setCamState("idle");
     setStatusText("Position your face in frame");
     return;
   }
 
   setCamState("detect");
-  setStatusText("Recognizing…");
 
   const match = matchDescriptor(detection.descriptor);
-  if (match) {
-    confirmMatch(match.name, match.distance);
-  } else {
+  if (!match) {
+    pendingMatch = null;
     showUnknown();
+    return;
   }
+
+  // An override button is already armed (staff pressed it) — confirm now,
+  // no need to wait out the grace period.
+  if (armedOverride) {
+    pendingMatch = null;
+    confirmMatch(match.name, match.distance);
+    return;
+  }
+
+  // No override armed yet. Hold the match on screen for a grace period so
+  // staff have time to tap Lunch Out / Lunch In / Half Day before this
+  // gets auto-logged as a normal login/logout.
+  if (!pendingMatch || pendingMatch.name !== match.name) {
+    pendingMatch = { name: match.name, distance: match.distance, firstSeenAt: Date.now() };
+  }
+
+  const elapsed = Date.now() - pendingMatch.firstSeenAt;
+  if (elapsed < CONFIG.PRE_SCAN_GRACE_MS) {
+    const secsLeft = Math.ceil((CONFIG.PRE_SCAN_GRACE_MS - elapsed) / 1000);
+    setStatusText(`Hi ${match.name} — tap a button now, or hold still (${secsLeft}s) for normal Login/Logout`);
+    return;
+  }
+
+  confirmMatch(match.name, match.distance);
+  pendingMatch = null;
 }
 
 function matchDescriptor(descriptor) {
@@ -235,6 +267,7 @@ function scheduleReset() {
     setCamState("idle");
     setStatusText("Position your face in frame");
     lastConfirmedAt = 0;
+    pendingMatch = null;
   }, CONFIG.CONFIRM_HOLD_MS);
 }
 
@@ -272,6 +305,7 @@ function disarmOverride() {
   armedOverride = null;
   document.querySelectorAll(".ovBtn").forEach(b => b.classList.remove("active"));
   $("armedNote").innerHTML = "&nbsp;";
+  pendingMatch = null;
 }
 
 // ── Offline queue (for scan events) ───────────────────────────
