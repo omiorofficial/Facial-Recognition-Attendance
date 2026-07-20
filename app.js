@@ -18,8 +18,10 @@ const CONFIG = {
 
   // How long a recognized face is held on screen (unconfirmed) before we
   // auto-log it as a normal login/logout. Gives staff time to tap
-  // Lunch Out / Lunch In / Half Day buttons first.
-  PRE_SCAN_GRACE_MS: 3000,
+  // Lunch Out / Lunch In / Half Day buttons first. Starts counting from
+  // the moment the camera first sees the face, not from when the staff
+  // notices the screen — keep this generous.
+  PRE_SCAN_GRACE_MS: 6000,
 
   LOCAL_ROSTER_KEY: "omior_roster_cache_v1",
   LOCAL_QUEUE_KEY:  "omior_scan_queue_v1",
@@ -149,6 +151,7 @@ async function runDetection() {
   if (!detection) {
     // face left the frame — cancel any pending grace-period match
     pendingMatch = null;
+    $("resultCard").classList.remove("show");
     setCamState("idle");
     setStatusText("Position your face in frame");
     return;
@@ -182,6 +185,13 @@ async function runDetection() {
   if (elapsed < CONFIG.PRE_SCAN_GRACE_MS) {
     const secsLeft = Math.ceil((CONFIG.PRE_SCAN_GRACE_MS - elapsed) / 1000);
     setStatusText(`Hi ${match.name} — tap a button now, or hold still (${secsLeft}s) for normal Login/Logout`);
+    $("resultName").textContent = match.name;
+    $("resultMeta").textContent = `Tap Lunch/Half-day now — logging as Login/Logout in ${secsLeft}s`;
+    const actionEl = $("resultAction");
+    actionEl.textContent = "⏳ Waiting…";
+    actionEl.style.background = "var(--red-dim)";
+    actionEl.style.color = "var(--red)";
+    $("resultCard").classList.add("show");
     return;
   }
 
@@ -297,6 +307,15 @@ document.querySelectorAll(".ovBtn").forEach(btn => {
       btn.classList.add("active");
       armedOverride = type;
       $("armedNote").textContent = "Armed: " + scanTypeLabel(type) + " — scan a face now";
+
+      // A face was already recognized and is sitting in the grace window
+      // waiting for a button press — confirm it immediately with this
+      // type instead of waiting for the next detection tick.
+      if (pendingMatch) {
+        const { name, distance } = pendingMatch;
+        pendingMatch = null;
+        confirmMatch(name, distance);
+      }
     }
   });
 });
