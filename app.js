@@ -23,8 +23,15 @@ const CONFIG = {
   // notices the screen — keep this generous.
   PRE_SCAN_GRACE_MS: 6000,
 
+  // Minimum gap between two logged scans for the SAME person, regardless
+  // of scan type or page reloads. Blocks accidental double-scans (e.g.
+  // camera catching the same face twice, a page refresh right after a
+  // scan, or someone lingering in frame).
+  DUPLICATE_SCAN_COOLDOWN_MS: 20000,
+
   LOCAL_ROSTER_KEY: "omior_roster_cache_v1",
   LOCAL_QUEUE_KEY:  "omior_scan_queue_v1",
+  LOCAL_RECENT_KEY: "omior_recent_submissions_v1",
 };
 
 // ── State ──────────────────────────────────────────────────────
@@ -34,7 +41,18 @@ let lastConfirmedAt = 0;
 let detecting = false;
 let stream = null;
 let pendingMatch = null;      // {name, distance, firstSeenAt} — face seen, waiting on grace period
-const recentSubmissions = {}; // name -> timestamp ms of last successful queue push
+
+// name -> timestamp ms of last successful scan. Persisted in localStorage
+// so the cooldown survives page reloads (a common cause of near-instant
+// duplicate scans on a kiosk that auto-refreshes).
+function loadRecentSubmissions() {
+  try { return JSON.parse(localStorage.getItem(CONFIG.LOCAL_RECENT_KEY) || "{}"); }
+  catch { return {}; }
+}
+function saveRecentSubmissions(obj) {
+  localStorage.setItem(CONFIG.LOCAL_RECENT_KEY, JSON.stringify(obj));
+}
+let recentSubmissions = loadRecentSubmissions();
 
 const $ = (id) => document.getElementById(id);
 
@@ -240,6 +258,26 @@ function scanTypeLabel(type) {
 }
 
 function confirmMatch(name, distance) {
+  // Guard: same person scanned again too soon — likely a duplicate
+  // (lingering in frame, camera re-trigger, or a page reload right
+  // after the last scan). Show it as recognized but don't log again.
+  const lastAt = recentSubmissions[name] || 0;
+  if (lastAt && Date.now() - lastAt < CONFIG.DUPLICATE_SCAN_COOLDOWN_MS) {
+    lastConfirmedAt = Date.now();
+    setCamState("match");
+    $("resultName").textContent = name;
+    $("resultMeta").textContent = "Already scanned just now — skipping duplicate";
+    const actionEl = $("resultAction");
+    actionEl.textContent = "⚠ Duplicate";
+    actionEl.style.background = "var(--red-dim)";
+    actionEl.style.color = "var(--red)";
+    $("resultCard").classList.add("show");
+    setStatusText("Duplicate scan ignored");
+    disarmOverride();
+    scheduleReset();
+    return;
+  }
+
   lastConfirmedAt = Date.now();
   setCamState("match");
 
@@ -255,6 +293,9 @@ function confirmMatch(name, distance) {
   actionEl.style.color = "var(--green)";
   $("resultCard").classList.add("show");
   setStatusText("Matched");
+
+  recentSubmissions[name] = Date.now();
+  saveRecentSubmissions(recentSubmissions);
 
   queueScan({
     name,
