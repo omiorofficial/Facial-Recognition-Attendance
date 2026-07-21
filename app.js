@@ -29,9 +29,19 @@ const CONFIG = {
   // scan, or someone lingering in frame).
   DUPLICATE_SCAN_COOLDOWN_MS: 20000,
 
+  // ── Adaptive face learning ──────────────────────────────────
+  // Silently keeps each person's stored face samples up to date
+  // (hair changes, glasses, beard growth, weight change, etc.) so
+  // matching stays fast and accurate without re-enrolling manually.
+  ADAPTIVE_LEARNING_ENABLED: true,
+  ADAPTIVE_MAX_DISTANCE: 0.32,      // stricter than MATCH_THRESHOLD — only learn from a very confident match
+  ADAPTIVE_MAX_EMBEDDINGS: 8,       // cap samples kept per person (oldest dropped first)
+  ADAPTIVE_MIN_INTERVAL_MS: 24 * 60 * 60 * 1000, // at most once per person per day
+
   LOCAL_ROSTER_KEY: "omior_roster_cache_v1",
   LOCAL_QUEUE_KEY:  "omior_scan_queue_v1",
   LOCAL_RECENT_KEY: "omior_recent_submissions_v1",
+  LOCAL_ADAPT_KEY:  "omior_adaptive_learn_last_v1",
 };
 
 // ── State ──────────────────────────────────────────────────────
@@ -197,7 +207,7 @@ async function runDetection() {
   // no need to wait out the grace period.
   if (armedOverride) {
     pendingMatch = null;
-    confirmMatch(match.name, match.distance);
+    confirmMatch(match.name, match.distance, detection.descriptor);
     return;
   }
 
@@ -205,7 +215,7 @@ async function runDetection() {
   // staff have time to tap Lunch Out / Lunch In / Half Day before this
   // gets auto-logged as a normal login/logout.
   if (!pendingMatch || pendingMatch.name !== match.name) {
-    pendingMatch = { name: match.name, distance: match.distance, firstSeenAt: Date.now() };
+    pendingMatch = { name: match.name, distance: match.distance, descriptor: detection.descriptor, firstSeenAt: Date.now() };
   }
 
   const elapsed = Date.now() - pendingMatch.firstSeenAt;
@@ -222,7 +232,7 @@ async function runDetection() {
     return;
   }
 
-  confirmMatch(match.name, match.distance);
+  confirmMatch(match.name, match.distance, detection.descriptor);
   pendingMatch = null;
 }
 
@@ -237,6 +247,57 @@ function matchDescriptor(descriptor) {
     }
   }
   return best;
+}
+
+// ── Adaptive face learning ────────────────────────────────────
+function loadAdaptTimestamps() {
+  try { return JSON.parse(localStorage.getItem(CONFIG.LOCAL_ADAPT_KEY) || "{}"); }
+  catch { return {}; }
+}
+function saveAdaptTimestamps(obj) {
+  localStorage.setItem(CONFIG.LOCAL_ADAPT_KEY, JSON.stringify(obj));
+}
+let adaptTimestamps = loadAdaptTimestamps();
+
+// Called after a CONFIDENT confirmed match. Folds the just-seen face into
+// that person's stored samples so drift over time (haircuts, glasses,
+// beard, weight) doesn't degrade matching. Never blocks the scan UI —
+// runs quietly in the background, and never touches the roster on a
+// weak/borderline match.
+async function maybeAdaptEmbedding(name, distance, descriptor) {
+  if (!CONFIG.ADAPTIVE_LEARNING_ENABLED) return;
+  if (distance > CONFIG.ADAPTIVE_MAX_DISTANCE) return; // not confident enough to learn from
+
+  const lastAt = adaptTimestamps[name] || 0;
+  if (Date.now() - lastAt < CONFIG.ADAPTIVE_MIN_INTERVAL_MS) return; // throttle to ~once/day/person
+
+  const person = roster.find(p => p.name === name);
+  if (!person) return;
+
+  // Build the updated sample set: existing + new, capped FIFO so both
+  // older and newer appearances stay represented.
+  const updated = [...person.embeddings, descriptor];
+  while (updated.length > CONFIG.ADAPTIVE_MAX_EMBEDDINGS) updated.shift();
+
+  const embeddingsArr = updated.map(e => Array.from(e));
+
+  try {
+    const res = await fetch(CONFIG.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action: "enroll", name, embeddings: embeddingsArr }),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "adaptive enroll failed");
+
+    // Reflect locally right away so this session benefits immediately.
+    person.embeddings = updated;
+    adaptTimestamps[name] = Date.now();
+    saveAdaptTimestamps(adaptTimestamps);
+  } catch (err) {
+    // Non-critical — just skip silently, no toast, don't interrupt the kiosk.
+    console.warn("Adaptive face update failed:", err.message);
+  }
 }
 
 // ── Result handling ───────────────────────────────────────────
@@ -257,7 +318,7 @@ function scanTypeLabel(type) {
   }[type] || type;
 }
 
-function confirmMatch(name, distance) {
+function confirmMatch(name, distance, descriptor) {
   // Guard: same person scanned again too soon — likely a duplicate
   // (lingering in frame, camera re-trigger, or a page reload right
   // after the last scan). Show it as recognized but don't log again.
@@ -302,6 +363,8 @@ function confirmMatch(name, distance) {
     scanType: mapScanTypeForApi(scanType),
     timestamp: now.toISOString(),
   });
+
+  if (descriptor) maybeAdaptEmbedding(name, distance, descriptor);
 
   disarmOverride();
   scheduleReset();
@@ -362,9 +425,9 @@ document.querySelectorAll(".ovBtn").forEach(btn => {
       // waiting for a button press — confirm it immediately with this
       // type instead of waiting for the next detection tick.
       if (pendingMatch) {
-        const { name, distance } = pendingMatch;
+        const { name, distance, descriptor } = pendingMatch;
         pendingMatch = null;
-        confirmMatch(name, distance);
+        confirmMatch(name, distance, descriptor);
       }
     }
   });
