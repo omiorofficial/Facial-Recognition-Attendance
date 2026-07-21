@@ -27,7 +27,7 @@ const CONFIG = {
   // of scan type or page reloads. Blocks accidental double-scans (e.g.
   // camera catching the same face twice, a page refresh right after a
   // scan, or someone lingering in frame).
-  DUPLICATE_SCAN_COOLDOWN_MS: 20000,
+  DUPLICATE_SCAN_COOLDOWN_MS: 30000,
 
   // ── Adaptive face learning ──────────────────────────────────
   // Silently keeps each person's stored face samples up to date
