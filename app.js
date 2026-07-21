@@ -441,6 +441,44 @@ function setQueue(q) {
 }
 function updateQueueBadge() { $("queueCount").textContent = getQueue().length; }
 
+// ── Clear stuck queue (press & hold the "Pending sync" badge) ─────
+// For scans that will never succeed (e.g. an old/invalid scanType
+// from a previous app version) and would otherwise retry forever.
+(function setupQueueClear() {
+  const btn = $("queueLink");
+  if (!btn) return;
+
+  let holdTimer = null;
+  let armed = false; // true = held long enough once, waiting for a second tap to confirm
+
+  function startHold() {
+    if (getQueue().length === 0) return;
+    holdTimer = setTimeout(() => {
+      armed = true;
+      $("armedNote").textContent = "Tap again to clear " + getQueue().length + " stuck pending sync item(s)";
+      showToast("Held 2s — tap the badge again to confirm clearing the queue");
+    }, 2000);
+  }
+
+  function cancelHold() {
+    clearTimeout(holdTimer);
+    holdTimer = null;
+  }
+
+  btn.addEventListener("pointerdown", startHold);
+  btn.addEventListener("pointerup", cancelHold);
+  btn.addEventListener("pointerleave", cancelHold);
+  btn.addEventListener("pointercancel", cancelHold);
+
+  btn.addEventListener("click", () => {
+    if (!armed) return; // plain tap does nothing — must hold 2s first
+    armed = false;
+    setQueue([]);
+    $("armedNote").innerHTML = "&nbsp;";
+    showToast("Pending sync cleared");
+  });
+})();
+
 async function queueScan(entry) {
   const q = getQueue();
   q.push(entry);
