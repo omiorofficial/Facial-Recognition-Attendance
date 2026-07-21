@@ -448,7 +448,18 @@ async function queueScan(entry) {
   flushQueue();
 }
 
+let flushing = false;
 async function flushQueue() {
+  if (flushing) return; // a flush is already in progress — don't double-send the same entries
+  flushing = true;
+  try {
+    await flushQueueInner();
+  } finally {
+    flushing = false;
+  }
+}
+
+async function flushQueueInner() {
   let q = getQueue();
   if (q.length === 0) return;
   if (!navigator.onLine) { setConn(false); return; }
