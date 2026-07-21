@@ -10,24 +10,21 @@ const CONFIG = {
   MODEL_URL: "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights",
 
   MATCH_THRESHOLD: 0.5,      // lower = stricter match (euclidean distance on 128d descriptor)
-  DETECT_INTERVAL_MS: 350,   // how often we run detection while idle/detecting
+  DETECT_INTERVAL_MS: 350,   // how often we run detection during an active scan session
   CONFIRM_HOLD_MS: 4000,     // how long a result stays on screen before resetting
   ROSTER_REFRESH_MS: 5 * 60 * 1000, // re-pull roster every 5 min
   QUEUE_RETRY_MS: 15000,     // retry failed scan uploads every 15s
   ENROLL_SHOTS: 5,
 
-  // How long a recognized face is held on screen (unconfirmed) before we
-  // auto-log it as a normal login/logout. Gives staff time to tap
-  // Lunch Out / Lunch In / Half Day buttons first. Starts counting from
-  // the moment the camera first sees the face, not from when the staff
-  // notices the screen — keep this generous.
-  PRE_SCAN_GRACE_MS: 6000,
+  // How long a scan session (camera on, waiting for a face) stays open
+  // after a button press with no match found, before auto-cancelling.
+  SESSION_TIMEOUT_MS: 20000,
 
   // Minimum gap between two logged scans for the SAME person, regardless
   // of scan type or page reloads. Blocks accidental double-scans (e.g.
   // camera catching the same face twice, a page refresh right after a
   // scan, or someone lingering in frame).
-  DUPLICATE_SCAN_COOLDOWN_MS: 30000,
+  DUPLICATE_SCAN_COOLDOWN_MS: 20000,
 
   // ── Adaptive face learning ──────────────────────────────────
   // Silently keeps each person's stored face samples up to date
@@ -46,11 +43,12 @@ const CONFIG = {
 
 // ── State ──────────────────────────────────────────────────────
 let roster = [];              // [{name, embeddings:[Float32Array,...]}]
-let armedOverride = null;     // "lunch_out" | "lunch_in" | "hd_entry" | "hd_exit" | null
+let activeScanType = null;    // "ot" | "lunch" | "hd_entry" | "hd_exit" | null — set only while a button-triggered session is live
 let lastConfirmedAt = 0;
 let detecting = false;
 let stream = null;
-let pendingMatch = null;      // {name, distance, firstSeenAt} — face seen, waiting on grace period
+let detectionTimer = null;    // interval handle for the current scan session (null = camera off / idle)
+let sessionTimeoutTimer = null;
 
 // name -> timestamp ms of last successful scan. Persisted in localStorage
 // so the cooldown survives page reloads (a common cause of near-instant
@@ -67,6 +65,10 @@ let recentSubmissions = loadRecentSubmissions();
 const $ = (id) => document.getElementById(id);
 
 // ── Boot ───────────────────────────────────────────────────────
+// NOTE: camera is NOT started here anymore. It only turns on when a
+// staff member presses one of the 4 action buttons (OT / Lunch /
+// Half Day Entry / Half Day Exit), and turns off again once that
+// scan session ends (match found, or timeout, or button pressed again).
 (async function init() {
   try {
     setBootMsg("Loading recognition models…");
@@ -79,12 +81,10 @@ const $ = (id) => document.getElementById(id);
     setBootMsg("Loading staff roster…");
     await loadRoster();
 
-    setBootMsg("Starting camera…");
-    await startCamera();
-
     $("boot").classList.add("hide");
     startClock();
-    startDetectionLoop();
+    setCamState("idle");
+    setStatusText("Select an action to begin");
     setInterval(loadRoster, CONFIG.ROSTER_REFRESH_MS);
     setInterval(flushQueue, CONFIG.QUEUE_RETRY_MS);
     updateQueueBadge();
@@ -116,6 +116,7 @@ function setConn(online) {
 
 // ── Camera ─────────────────────────────────────────────────────
 async function startCamera() {
+  if (stream) return; // already on
   stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
     audio: false,
@@ -123,6 +124,15 @@ async function startCamera() {
   const video = $("video");
   video.srcObject = stream;
   await video.play();
+}
+
+function stopCamera() {
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+  const video = $("video");
+  if (video) video.srcObject = null;
 }
 
 // ── Roster ─────────────────────────────────────────────────────
@@ -152,27 +162,69 @@ async function loadRoster() {
   }
 }
 
-// ── Detection loop ────────────────────────────────────────────
-function startDetectionLoop() {
-  setInterval(async () => {
-    if (detecting) return;
-    // pause detection while a result card is showing
-    if (Date.now() - lastConfirmedAt < CONFIG.CONFIRM_HOLD_MS && lastConfirmedAt !== 0) return;
+// ── Scan session ───────────────────────────────────────────────
+// A "session" = camera on + actively looking for a face for ONE
+// specific scan type. Started only by a button press, stopped as
+// soon as we get a match (or the person cancels / it times out).
+async function startScanSession(type) {
+  // Pressing the same button again cancels the session instead of
+  // restarting it.
+  if (activeScanType === type) {
+    endScanSession();
+    return;
+  }
 
+  endScanSession(); // clear out any other session first
+
+  activeScanType = type;
+  document.querySelectorAll(".ovBtn").forEach(b => {
+    b.classList.toggle("active", b.dataset.type === type);
+  });
+  $("armedNote").textContent = scanTypeLabel(type) + " — opening camera…";
+
+  try {
+    await startCamera();
+  } catch (err) {
+    $("armedNote").textContent = "Camera error: " + err.message;
+    activeScanType = null;
+    document.querySelectorAll(".ovBtn").forEach(b => b.classList.remove("active"));
+    return;
+  }
+
+  setCamState("idle");
+  setStatusText("Position your face in frame");
+  $("armedNote").textContent = scanTypeLabel(type) + " — scan a face now";
+
+  detectionTimer = setInterval(async () => {
+    if (detecting) return;
     detecting = true;
     try { await runDetection(); }
     catch (err) { console.error("detection error", err); }
     detecting = false;
   }, CONFIG.DETECT_INTERVAL_MS);
+
+  sessionTimeoutTimer = setTimeout(() => {
+    if (activeScanType === type) {
+      $("armedNote").textContent = "Timed out — tap the button to try again.";
+      endScanSession();
+    }
+  }, CONFIG.SESSION_TIMEOUT_MS);
+}
+
+function endScanSession() {
+  if (detectionTimer) { clearInterval(detectionTimer); detectionTimer = null; }
+  if (sessionTimeoutTimer) { clearTimeout(sessionTimeoutTimer); sessionTimeoutTimer = null; }
+  activeScanType = null;
+  document.querySelectorAll(".ovBtn").forEach(b => b.classList.remove("active"));
+  stopCamera();
 }
 
 async function runDetection() {
   const video = $("video");
   if (video.readyState < 2) return;
 
-  // A result was just confirmed (e.g. via button click) — don't let an
-  // in-flight detection that resolves afterward touch the DOM and wipe
-  // the confirmed card early.
+  // A result was just confirmed — don't let an in-flight detection
+  // that resolves afterward touch the DOM and wipe the confirmed card.
   if (lastConfirmedAt !== 0 && Date.now() - lastConfirmedAt < CONFIG.CONFIRM_HOLD_MS) return;
 
   const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
@@ -184,11 +236,9 @@ async function runDetection() {
   // Re-check after the await — a confirm may have happened while this
   // scan was running.
   if (lastConfirmedAt !== 0 && Date.now() - lastConfirmedAt < CONFIG.CONFIRM_HOLD_MS) return;
+  if (!activeScanType) return; // session was cancelled while this was running
 
   if (!detection) {
-    // face left the frame — cancel any pending grace-period match
-    pendingMatch = null;
-    $("resultCard").classList.remove("show");
     setCamState("idle");
     setStatusText("Position your face in frame");
     return;
@@ -198,42 +248,13 @@ async function runDetection() {
 
   const match = matchDescriptor(detection.descriptor);
   if (!match) {
-    pendingMatch = null;
     showUnknown();
     return;
   }
 
-  // An override button is already armed (staff pressed it) — confirm now,
-  // no need to wait out the grace period.
-  if (armedOverride) {
-    pendingMatch = null;
-    confirmMatch(match.name, match.distance, detection.descriptor);
-    return;
-  }
-
-  // No override armed yet. Hold the match on screen for a grace period so
-  // staff have time to tap Lunch Out / Lunch In / Half Day before this
-  // gets auto-logged as a normal login/logout.
-  if (!pendingMatch || pendingMatch.name !== match.name) {
-    pendingMatch = { name: match.name, distance: match.distance, descriptor: detection.descriptor, firstSeenAt: Date.now() };
-  }
-
-  const elapsed = Date.now() - pendingMatch.firstSeenAt;
-  if (elapsed < CONFIG.PRE_SCAN_GRACE_MS) {
-    const secsLeft = Math.ceil((CONFIG.PRE_SCAN_GRACE_MS - elapsed) / 1000);
-    setStatusText(`Hi ${match.name} — tap a button now, or hold still (${secsLeft}s) for normal Login/Logout`);
-    $("resultName").textContent = match.name;
-    $("resultMeta").textContent = `Tap Lunch/Half-day now — logging as Login/Logout in ${secsLeft}s`;
-    const actionEl = $("resultAction");
-    actionEl.textContent = "⏳ Waiting…";
-    actionEl.style.background = "var(--red-dim)";
-    actionEl.style.color = "var(--red)";
-    $("resultCard").classList.add("show");
-    return;
-  }
-
+  // Button was already pressed before the camera ever turned on, so we
+  // confirm the moment we get a confident match — no waiting/grace period.
   confirmMatch(match.name, match.distance, detection.descriptor);
-  pendingMatch = null;
 }
 
 function matchDescriptor(descriptor) {
@@ -301,24 +322,18 @@ async function maybeAdaptEmbedding(name, distance, descriptor) {
 }
 
 // ── Result handling ───────────────────────────────────────────
-function inferScanType() {
-  if (armedOverride) return armedOverride;
-  // default: treat as ordinary OT login/logout — backend infers
-  // login vs logout by time, same as the QR flow does today.
-  return "ot";
-}
-
 function scanTypeLabel(type) {
   return {
-    ot:        "Login / Logout",
-    lunch_out: "Lunch Out",
-    lunch_in:  "Lunch In",
+    ot:        "Overtime (Login / Logout)",
+    lunch:     "Lunch",
     hd_entry:  "Half Day — Entry",
     hd_exit:   "Half Day — Exit",
   }[type] || type;
 }
 
 function confirmMatch(name, distance, descriptor) {
+  const scanType = activeScanType || "ot";
+
   // Guard: same person scanned again too soon — likely a duplicate
   // (lingering in frame, camera re-trigger, or a page reload right
   // after the last scan). Show it as recognized but don't log again.
@@ -334,7 +349,7 @@ function confirmMatch(name, distance, descriptor) {
     actionEl.style.color = "var(--red)";
     $("resultCard").classList.add("show");
     setStatusText("Duplicate scan ignored");
-    disarmOverride();
+    endScanSession();
     scheduleReset();
     return;
   }
@@ -342,7 +357,6 @@ function confirmMatch(name, distance, descriptor) {
   lastConfirmedAt = Date.now();
   setCamState("match");
 
-  const scanType = inferScanType();
   const now = new Date();
   const timeStr = now.toLocaleTimeString("en-GB", { hour12: false });
 
@@ -360,13 +374,15 @@ function confirmMatch(name, distance, descriptor) {
 
   queueScan({
     name,
-    scanType: mapScanTypeForApi(scanType),
+    scanType, // already "ot" | "lunch" | "hd_entry" | "hd_exit" — matches backend directly
     timestamp: now.toISOString(),
   });
 
   if (descriptor) maybeAdaptEmbedding(name, distance, descriptor);
 
-  disarmOverride();
+  // Scan done — close the camera immediately. Staff presses a button
+  // again for the next scan.
+  endScanSession();
   scheduleReset();
 }
 
@@ -387,19 +403,14 @@ function showUnknown() {
 function scheduleReset() {
   setTimeout(() => {
     $("resultCard").classList.remove("show");
-    setCamState("idle");
-    setStatusText("Position your face in frame");
     lastConfirmedAt = 0;
-    pendingMatch = null;
+    // Only reset the idle status text/cam state if no NEW session has
+    // started in the meantime (camera may already be off/on again).
+    if (!activeScanType) {
+      setCamState("idle");
+      setStatusText("Select an action to begin");
+    }
   }, CONFIG.CONFIRM_HOLD_MS);
-}
-
-function mapScanTypeForApi(type) {
-  // Backend only distinguishes: ot, lunch, hd_entry, hd_exit.
-  // Lunch direction (out vs in) is inferred server-side from whether
-  // it's the person's 1st or 2nd lunch scan today — same as QR flow.
-  if (type === "lunch_out" || type === "lunch_in") return "lunch";
-  return type; // ot, hd_entry, hd_exit pass through unchanged
 }
 
 function setCamState(state) {
@@ -409,36 +420,15 @@ function setCamState(state) {
 }
 function setStatusText(txt) { $("statusText").textContent = txt; }
 
-// ── Override buttons ──────────────────────────────────────────
+// ── Action buttons — Overtime / Lunch / Half Day Entry / Half Day Exit ──
+// Each button press: (1) opens the camera, (2) scans, (3) logs, (4)
+// closes the camera again. Pressing the currently-active button cancels
+// the session instead.
 document.querySelectorAll(".ovBtn").forEach(btn => {
   btn.addEventListener("click", () => {
-    const type = btn.dataset.type;
-    if (armedOverride === type) {
-      disarmOverride();
-    } else {
-      document.querySelectorAll(".ovBtn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      armedOverride = type;
-      $("armedNote").textContent = "Armed: " + scanTypeLabel(type) + " — scan a face now";
-
-      // A face was already recognized and is sitting in the grace window
-      // waiting for a button press — confirm it immediately with this
-      // type instead of waiting for the next detection tick.
-      if (pendingMatch) {
-        const { name, distance, descriptor } = pendingMatch;
-        pendingMatch = null;
-        confirmMatch(name, distance, descriptor);
-      }
-    }
+    startScanSession(btn.dataset.type);
   });
 });
-
-function disarmOverride() {
-  armedOverride = null;
-  document.querySelectorAll(".ovBtn").forEach(b => b.classList.remove("active"));
-  $("armedNote").innerHTML = "&nbsp;";
-  pendingMatch = null;
-}
 
 // ── Offline queue (for scan events) ───────────────────────────
 function getQueue() {
