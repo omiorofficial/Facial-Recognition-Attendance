@@ -46,7 +46,6 @@
     height:100dvh;
   }
 
-  /* ── Top bar ─────────────────────────────────────────── */
   #topbar{
     display:flex; align-items:center; justify-content:space-between;
     padding:14px 18px;
@@ -55,24 +54,16 @@
     flex-shrink:0;
     z-index:5;
   }
-  .brand{
-    display:flex; align-items:center; gap:10px;
-  }
+  .brand{ display:flex; align-items:center; gap:10px; }
   .brand-mark{
     width:28px; height:28px; border-radius:8px;
     background:linear-gradient(135deg,var(--amber),#f6d365);
     display:flex; align-items:center; justify-content:center;
     font-weight:700; font-size:13px; color:#1a1200;
   }
-  .brand-name{
-    font-weight:700; font-size:14px; letter-spacing:1.5px; color:var(--amber);
-  }
-  .brand-sub{
-    font-size:9px; color:var(--text-faint); letter-spacing:1px; margin-top:1px;
-  }
-  #clock{
-    font-size:13px; color:var(--text-dim); letter-spacing:0.5px;
-  }
+  .brand-name{ font-weight:700; font-size:14px; letter-spacing:1.5px; color:var(--amber); }
+  .brand-sub{ font-size:9px; color:var(--text-faint); letter-spacing:1px; margin-top:1px; }
+  #clock{ font-size:13px; color:var(--text-dim); letter-spacing:0.5px; }
   #conn{
     display:flex; align-items:center; gap:5px; font-size:9px; color:var(--text-faint);
     letter-spacing:0.5px; margin-top:2px; justify-content:flex-end;
@@ -82,21 +73,14 @@
   #conn.offline{ color:var(--red); }
   @keyframes blink{ 0%,100%{opacity:1} 50%{opacity:0.25} }
 
-  /* ── Camera stage ────────────────────────────────────── */
   #stage{
-    position:relative;
-    flex:1;
+    position:relative; flex:1;
     display:flex; align-items:center; justify-content:center;
-    padding:22px;
-    min-height:0;
+    padding:22px; min-height:0;
   }
   #camWrap{
-    position:relative;
-    width:100%; max-width:520px;
-    aspect-ratio:3/4;
-    border-radius:var(--radius);
-    overflow:hidden;
-    background:#000;
+    position:relative; width:100%; max-width:520px; aspect-ratio:3/4;
+    border-radius:var(--radius); overflow:hidden; background:#000;
     border:2px solid var(--panel-line);
     transition:border-color 0.35s ease, box-shadow 0.35s ease;
   }
@@ -106,19 +90,14 @@
   #camWrap.state-unknown{ border-color:var(--red);    box-shadow:0 0 0 3px var(--red-dim), 0 0 40px -8px var(--red); }
 
   video{
-    position:absolute; inset:0;
-    width:100%; height:100%;
-    object-fit:cover;
-    transform:scaleX(-1); /* mirror, feels natural at a gate */
+    position:absolute; inset:0; width:100%; height:100%;
+    object-fit:cover; transform:scaleX(-1);
   }
   canvas#overlay{
-    position:absolute; inset:0;
-    width:100%; height:100%;
-    transform:scaleX(-1);
-    pointer-events:none;
+    position:absolute; inset:0; width:100%; height:100%;
+    transform:scaleX(-1); pointer-events:none;
   }
 
-  /* face guide ring, shown when idle/detecting */
   #guideRing{
     position:absolute; inset:0;
     display:flex; align-items:center; justify-content:center;
@@ -127,18 +106,13 @@
   #guideRing svg{ width:62%; opacity:0.35; }
   #camWrap.state-match #guideRing, #camWrap.state-unknown #guideRing{ display:none; }
 
-  /* status pill floating on camera */
   #statusPill{
     position:absolute; top:14px; left:50%; transform:translateX(-50%);
-    padding:7px 16px;
-    border-radius:999px;
-    background:rgba(10,14,20,0.72);
-    backdrop-filter:blur(8px);
+    padding:7px 16px; border-radius:999px;
+    background:rgba(10,14,20,0.72); backdrop-filter:blur(8px);
     font-size:11px; font-weight:600; letter-spacing:0.8px;
-    color:var(--amber-);
-    border:1px solid var(--panel-line);
-    display:flex; align-items:center; gap:7px;
-    white-space:nowrap;
+    color:var(--amber-); border:1px solid var(--panel-line);
+    display:flex; align-items:center; gap:7px; white-space:nowrap;
   }
   #statusPill .p-dot{ width:6px; height:6px; border-radius:50%; background:var(--amber); }
   .state-detect  #statusPill .p-dot{ background:var(--cyan); animation:pulse 1s infinite; }
@@ -146,7 +120,6 @@
   .state-unknown #statusPill .p-dot{ background:var(--red); }
   @keyframes pulse{ 0%,100%{transform:scale(1); opacity:1;} 50%{transform:scale(1.6); opacity:0.5;} }
 
-  /* result card slides up over bottom of camera on match */
   #resultCard{
     position:absolute; left:0; right:0; bottom:0;
     padding:20px 20px 24px;
@@ -164,7 +137,6 @@
     font-size:11px; font-weight:600; letter-spacing:0.4px;
   }
 
-  /* ── Override bar ────────────────────────────────────── */
   #overrideBar{
     flex-shrink:0;
     padding:12px 16px calc(12px + env(safe-area-inset-bottom));
@@ -176,28 +148,19 @@
     color:var(--text-faint); margin-bottom:9px; text-align:center;
   }
   #overrideGrid{
-    display:grid;
-    grid-template-columns:repeat(4,1fr);
-    gap:8px;
+    display:grid; grid-template-columns:repeat(4,1fr); gap:8px;
   }
   .ovBtn{
     appearance:none; border:1px solid var(--panel-line);
-    background:rgba(255,255,255,0.03);
-    color:var(--text);
-    border-radius:var(--radius-sm);
-    padding:12px 4px 10px;
+    background:rgba(255,255,255,0.03); color:var(--text);
+    border-radius:var(--radius-sm); padding:12px 4px 10px;
     display:flex; flex-direction:column; align-items:center; gap:5px;
     font-family:inherit; font-size:10.5px; font-weight:600; letter-spacing:0.3px;
-    cursor:pointer;
-    transition:all 0.15s ease;
+    cursor:pointer; transition:all 0.15s ease;
   }
   .ovBtn .ico{ font-size:18px; line-height:1; }
   .ovBtn:active{ transform:scale(0.95); }
-  .ovBtn.active{
-    background:var(--amber-dim);
-    border-color:var(--amber);
-    color:var(--amber);
-  }
+  .ovBtn.active{ background:var(--amber-dim); border-color:var(--amber); color:var(--amber); }
   .ovBtn.active .ico{ filter:drop-shadow(0 0 6px var(--amber)); }
 
   #armedNote{
@@ -205,11 +168,7 @@
     margin-top:9px; min-height:14px; letter-spacing:0.3px;
   }
 
-  /* ── Bottom utility row ──────────────────────────────── */
-  #utilRow{
-    display:flex; justify-content:center; gap:18px;
-    margin-top:10px;
-  }
+  #utilRow{ display:flex; justify-content:center; gap:18px; margin-top:10px; }
   .utilLink{
     background:none; border:none; color:var(--text-faint);
     font-family:inherit; font-size:10px; letter-spacing:0.5px;
@@ -217,7 +176,6 @@
   }
   .utilLink:active{ color:var(--text-dim); }
 
-  /* ── Toast (offline queue / errors) ─────────────────── */
   #toast{
     position:fixed; left:50%; top:16px; transform:translate(-50%,-140%);
     background:var(--panel); border:1px solid var(--panel-line);
@@ -228,26 +186,20 @@
   }
   #toast.show{ transform:translate(-50%,0); }
 
-  /* ── Enroll modal ─────────────────────────────────────── */
   #enrollOverlay{
     position:fixed; inset:0; z-index:40;
-    background:rgba(4,6,9,0.9);
-    backdrop-filter:blur(6px);
-    display:none;
-    align-items:flex-end; justify-content:center;
+    background:rgba(4,6,9,0.9); backdrop-filter:blur(6px);
+    display:none; align-items:flex-end; justify-content:center;
   }
   #enrollOverlay.show{ display:flex; }
   #enrollSheet{
-    width:100%; max-width:520px;
-    background:var(--panel);
+    width:100%; max-width:520px; background:var(--panel);
     border-radius:20px 20px 0 0;
     border:1px solid var(--panel-line); border-bottom:none;
     padding:20px 20px calc(20px + env(safe-area-inset-bottom));
     max-height:88vh; overflow-y:auto;
   }
-  #enrollSheet h2{
-    margin:0 0 3px; font-size:17px; font-weight:700; color:var(--amber);
-  }
+  #enrollSheet h2{ margin:0 0 3px; font-size:17px; font-weight:700; color:var(--amber); }
   #enrollSheet .hint{ font-size:11.5px; color:var(--text-dim); margin-bottom:16px; }
   #enrollSheet label{ font-size:10px; letter-spacing:0.8px; text-transform:uppercase; color:var(--text-faint); }
   #enrollName{
@@ -262,9 +214,7 @@
     border:2px solid var(--panel-line);
   }
   #enrollVideo{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
-  #enrollProgress{
-    display:flex; gap:6px; justify-content:center; margin-bottom:14px;
-  }
+  #enrollProgress{ display:flex; gap:6px; justify-content:center; margin-bottom:14px; }
   .capDot{ width:9px; height:9px; border-radius:50%; background:rgba(255,255,255,0.12); border:1px solid var(--panel-line); }
   .capDot.done{ background:var(--green); border-color:var(--green); }
   #enrollActions{ display:flex; gap:10px; }
@@ -278,7 +228,6 @@
   .btn:disabled{ opacity:0.4; }
   #enrollStatus{ font-size:11.5px; text-align:center; margin-top:12px; min-height:16px; color:var(--text-dim); }
 
-  /* loading screen while models load */
   #boot{
     position:fixed; inset:0; z-index:60;
     background:var(--bg); display:flex; flex-direction:column;
@@ -328,7 +277,7 @@
         </svg>
       </div>
 
-      <div id="statusPill"><span class="p-dot"></span><span id="statusText">Position your face in frame</span></div>
+      <div id="statusPill"><span class="p-dot"></span><span id="statusText">Select an action to begin</span></div>
 
       <div id="resultCard">
         <div id="resultName">—</div>
@@ -339,12 +288,12 @@
   </div>
 
   <div id="overrideBar">
-    <div id="overrideLabel">If this doesn't match login / logout — select before scanning</div>
+    <div id="overrideLabel">Select an action — camera opens after you tap</div>
     <div id="overrideGrid">
-      <button class="ovBtn" data-type="lunch_out"><span class="ico">🍽️</span>Lunch Out</button>
-      <button class="ovBtn" data-type="lunch_in"><span class="ico">🔵</span>Lunch In</button>
-      <button class="ovBtn" data-type="hd_entry"><span class="ico">📋</span>Half Day In</button>
-      <button class="ovBtn" data-type="hd_exit"><span class="ico">📋</span>Half Day Out</button>
+      <button class="ovBtn" data-type="ot"><span class="ico">🕐</span>Overtime</button>
+      <button class="ovBtn" data-type="lunch"><span class="ico">🍽️</span>Lunch</button>
+      <button class="ovBtn" data-type="hd_entry"><span class="ico">📋</span>Half Day Entry</button>
+      <button class="ovBtn" data-type="hd_exit"><span class="ico">📋</span>Half Day Exit</button>
     </div>
     <div id="armedNote">&nbsp;</div>
     <div id="utilRow">
@@ -357,7 +306,6 @@
 
 <div id="toast"></div>
 
-<!-- ── Enroll modal ─────────────────────────────────────── -->
 <div id="enrollOverlay">
   <div id="enrollSheet">
     <h2>Enroll new staff</h2>
@@ -386,7 +334,6 @@
   </div>
 </div>
 
-<!-- face-api.js — bundled recognition (detection + landmarks + 128d embedding) -->
 <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 <script src="app.js"></script>
 </body>
