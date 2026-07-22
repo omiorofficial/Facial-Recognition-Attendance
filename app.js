@@ -11,7 +11,7 @@ const CONFIG = {
 
   MATCH_THRESHOLD: 0.5,      // lower = stricter match (euclidean distance on 128d descriptor)
   DETECT_INTERVAL_MS: 350,   // how often we run detection during an active scan session
-  CONFIRM_HOLD_MS: 4000,     // how long a result stays on screen before resetting
+  CONFIRM_HOLD_MS: 5000,     // how long a result stays on screen before resetting (or until next button press)
   ROSTER_REFRESH_MS: 5 * 60 * 1000, // re-pull roster every 5 min
   QUEUE_RETRY_MS: 15000,     // retry failed scan uploads every 15s
   ENROLL_SHOTS: 5,
@@ -171,10 +171,12 @@ async function startScanSession(type) {
   // restarting it.
   if (activeScanType === type) {
     endScanSession();
+    clearResultCard();
     return;
   }
 
-  endScanSession(); // clear out any other session first
+  endScanSession();   // clear out any other session first
+  clearResultCard();  // dismiss previous person's notification immediately
 
   activeScanType = type;
   document.querySelectorAll(".ovBtn").forEach(b => {
@@ -217,6 +219,14 @@ function endScanSession() {
   activeScanType = null;
   document.querySelectorAll(".ovBtn").forEach(b => b.classList.remove("active"));
   stopCamera();
+}
+
+// Immediately dismisses any still-visible result notification. Called
+// whenever a new scan button is pressed, so a leftover "5s hold" from
+// the previous scan never overlaps the next person's session.
+function clearResultCard() {
+  $("resultCard").classList.remove("show");
+  lastConfirmedAt = 0;
 }
 
 async function runDetection() {
@@ -361,13 +371,13 @@ function confirmMatch(name, distance, descriptor) {
   const timeStr = now.toLocaleTimeString("en-GB", { hour12: false });
 
   $("resultName").textContent = name;
-  $("resultMeta").innerHTML = `<b>⏰ ${timeStr}</b> &nbsp;·&nbsp; ${scanTypeLabel(scanType)}`;
+  $("resultMeta").innerHTML = `Your <b>${scanTypeLabel(scanType)}</b> scan at <b>⏰ ${timeStr}</b> is successful`;
   const actionEl = $("resultAction");
-  actionEl.textContent = "✓ Recorded";
+  actionEl.textContent = "✓ Success";
   actionEl.style.background = "var(--green-dim)";
   actionEl.style.color = "var(--green)";
   $("resultCard").classList.add("show");
-  setStatusText("Matched");
+  setStatusText(`${scanTypeLabel(scanType)} scan successful`);
 
   recentSubmissions[name] = Date.now();
   saveRecentSubmissions(recentSubmissions);
