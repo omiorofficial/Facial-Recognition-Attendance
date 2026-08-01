@@ -17,6 +17,14 @@ const CONFIG = {
   QUEUE_RETRY_MS: 15000,     // retry failed scan uploads every 15s
   ENROLL_SHOTS: 5,
 
+  // ── Backend reachability ────────────────────────────────────────
+  // navigator.onLine only tells us the device has SOME network
+  // interface up — it says nothing about whether our specific
+  // API_URL is actually reachable. We separately ping the backend
+  // itself so "online" reflects reality, not just a wifi icon.
+  PING_INTERVAL_MS: 30000,
+  PING_TIMEOUT_MS: 6000,
+
   // ── Offline queue ────────────────────────────────────────────
   MAX_QUEUE_SIZE: 20,       // max scans held locally while offline
   DUPE_WINDOW_MS: 5000,     // ignore a queue push that exactly repeats one already queued
@@ -34,6 +42,7 @@ let detecting = false;        // guards against overlapping detectSingleFace cal
 let detectTimer = null;       // interval id for the active-session detection loop
 let idleTimeoutTimer = null;  // auto shut-off if a session is started but nobody shows up
 let flushing = false;         // prevents overlapping flushQueue runs
+let backendReachable = true;  // last known result of actually reaching CONFIG.API_URL
 
 const $ = (id) => document.getElementById(id);
 
@@ -60,10 +69,12 @@ const $ = (id) => document.getElementById(id);
 
     setInterval(loadRoster, CONFIG.ROSTER_REFRESH_MS);
     setInterval(flushQueue, CONFIG.QUEUE_RETRY_MS);
+    setInterval(pingBackend, CONFIG.PING_INTERVAL_MS);
     updateQueueBadge();
-    window.addEventListener("online",  () => { setConn(true); flushQueue(); });
-    window.addEventListener("offline", () => setConn(false));
-    setConn(navigator.onLine);
+    window.addEventListener("online",  () => { updateConnDisplay(); pingBackend(); flushQueue(); });
+    window.addEventListener("offline", () => updateConnDisplay());
+    updateConnDisplay();
+    pingBackend();
 
     // Tapping the camera area itself is the "any button" for a plain
     // login/logout scan when the camera is currently off.
@@ -87,10 +98,49 @@ function startClock() {
   setInterval(tick, 1000);
 }
 
-function setConn(online) {
+// ── Connection status: device network AND backend reachability ──
+// navigator.onLine can say "online" while CONFIG.API_URL is actually
+// unreachable (wrong URL, deployment down, Google-side hiccup). We
+// track both separately so the status shown actually matches whether
+// scans can sync — not just whether the phone has a network icon.
+function updateConnDisplay() {
   const el = $("conn");
-  el.classList.toggle("offline", !online);
-  $("connText").textContent = online ? "online" : "offline — queuing scans";
+  const deviceOnline = navigator.onLine;
+  const healthy = deviceOnline && backendReachable;
+  el.classList.toggle("offline", !healthy);
+
+  if (!deviceOnline) {
+    $("connText").textContent = "offline — queuing scans";
+  } else if (!backendReachable) {
+    $("connText").textContent = "backend unreachable — queuing scans";
+  } else {
+    $("connText").textContent = "online";
+  }
+}
+
+// Any code that just confirmed (or just failed) an actual round-trip
+// to the backend — a real scan, a roster fetch, a ping — should call
+// this instead of guessing from navigator.onLine alone.
+function markBackendReachable(reachable) {
+  backendReachable = reachable;
+  updateConnDisplay();
+}
+
+async function pingBackend() {
+  if (!navigator.onLine) { updateConnDisplay(); return; }
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CONFIG.PING_TIMEOUT_MS);
+    const res = await fetch(CONFIG.API_URL + "?action=ping", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    const data = await res.json();
+    markBackendReachable(!!(data && data.ok));
+  } catch (err) {
+    markBackendReachable(false);
+  }
 }
 
 // ── Camera hardware ────────────────────────────────────────────
@@ -124,7 +174,7 @@ async function loadRoster() {
       embeddings: s.embeddings.map(e => new Float32Array(e)),
     }));
     localStorage.setItem(CONFIG.LOCAL_ROSTER_KEY, JSON.stringify(data.staff));
-    setConn(true);
+    markBackendReachable(true);
   } catch (err) {
     console.warn("Roster refresh failed, using cache if available:", err.message);
     const cached = localStorage.getItem(CONFIG.LOCAL_ROSTER_KEY);
@@ -135,7 +185,7 @@ async function loadRoster() {
         embeddings: s.embeddings.map(e => new Float32Array(e)),
       }));
     }
-    setConn(false);
+    markBackendReachable(false);
   }
 }
 
@@ -405,7 +455,7 @@ async function queueScan(entry) {
 
 async function flushQueue() {
   if (flushing) return;
-  if (!navigator.onLine) { setConn(false); return; }
+  if (!navigator.onLine) { updateConnDisplay(); return; }
 
   const q = getQueue();
   if (q.length === 0) return;
@@ -432,10 +482,11 @@ async function flushQueue() {
         const current = getQueue();
         saveQueue(current.filter(e => e.id !== entry.id));
         sentCount++;
-        setConn(true);
+        markBackendReachable(true);
       } catch (err) {
         console.warn("Scan upload failed, will retry:", err.message);
         showToast("Sync error: " + err.message);
+        markBackendReachable(false);
         // leave this entry exactly where it is in storage; try again next pass
       }
     }
