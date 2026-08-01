@@ -1,558 +1,342 @@
-// ═══════════════════════════════════════════════════════════════
-//  OMIOR GATE SCAN — kiosk logic
-// ═══════════════════════════════════════════════════════════════
-
-const CONFIG = {
-  // Paste your deployed Apps Script Web App URL here (the one from
-  // FaceKiosk_AppsScript.gs, NOT the existing attendance script).
-  API_URL: "https://script.google.com/macros/s/AKfycbzx1d3ibfzBuMiwBOmM2R6FKr61kiDiGeSZF2jsSIj55u5cu-xhVqVtyQRzfKZb8hGr1A/exec",
-
-  MODEL_URL: "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights",
-
-  MATCH_THRESHOLD: 0.5,      // lower = stricter match (euclidean distance on 128d descriptor)
-  DETECT_INTERVAL_MS: 350,   // how often we check for a face while a session is active
-  CONFIRM_HOLD_MS: 4000,     // how long the result card stays visible before the camera shuts off
-  CAMERA_IDLE_TIMEOUT_MS: 25000, // if a session is started but no face ever appears, shut off anyway
-  ROSTER_REFRESH_MS: 5 * 60 * 1000, // re-pull roster every 5 min
-  QUEUE_RETRY_MS: 15000,     // retry failed scan uploads every 15s
-  ENROLL_SHOTS: 5,
-
-  // ── Offline queue ────────────────────────────────────────────
-  MAX_QUEUE_SIZE: 20,       // max scans held locally while offline
-  DUPE_WINDOW_MS: 5000,     // ignore a queue push that exactly repeats one already queued
-
-  LOCAL_ROSTER_KEY: "omior_roster_cache_v1",
-  LOCAL_QUEUE_KEY:  "omior_scan_queue_v1",
-};
-
-// ── State ──────────────────────────────────────────────────────
-let roster = [];              // [{name, embeddings:[Float32Array,...]}]
-let armedOverride = null;     // "lunch_out" | "lunch_in" | "hd_entry" | "hd_exit" | null
-let stream = null;
-let cameraOn = false;         // is the camera hardware currently live?
-let detecting = false;        // guards against overlapping detectSingleFace calls
-let detectTimer = null;       // interval id for the active-session detection loop
-let idleTimeoutTimer = null;  // auto shut-off if a session is started but nobody shows up
-let flushing = false;         // prevents overlapping flushQueue runs
-
-const $ = (id) => document.getElementById(id);
-
-// ── Boot ───────────────────────────────────────────────────────
-// NOTE: the camera is NOT started here. It only turns on when someone
-// taps the camera area or one of the action buttons, and turns back
-// off the instant a face has been processed. See beginScanSession /
-// endScanSession below.
-(async function init() {
-  try {
-    setBootMsg("Loading recognition models…");
-    await Promise.all([
-      faceapi.nets.tinyFaceDetector.loadFromUri(CONFIG.MODEL_URL),
-      faceapi.nets.faceLandmark68Net.loadFromUri(CONFIG.MODEL_URL),
-      faceapi.nets.faceRecognitionNet.loadFromUri(CONFIG.MODEL_URL),
-    ]);
-
-    setBootMsg("Loading staff roster…");
-    await loadRoster();
-
-    $("boot").classList.add("hide");
-    startClock();
-    goIdle("Tap to scan");
-
-    setInterval(loadRoster, CONFIG.ROSTER_REFRESH_MS);
-    setInterval(flushQueue, CONFIG.QUEUE_RETRY_MS);
-    updateQueueBadge();
-    window.addEventListener("online",  () => { setConn(true); flushQueue(); });
-    window.addEventListener("offline", () => setConn(false));
-    setConn(navigator.onLine);
-
-    // Tapping the camera area itself is the "any button" for a plain
-    // login/logout scan when the camera is currently off.
-    $("camWrap").addEventListener("click", () => {
-      if (!cameraOn) beginScanSession(null);
-    });
-  } catch (err) {
-    setBootMsg("Setup error: " + err.message + " — reload to retry.");
-    console.error(err);
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>OMIOR — Gate Scan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:            #0a0e14;
+    --panel:         #10161f;
+    --panel-line:    rgba(255,255,255,0.07);
+    --text:          #eef2f6;
+    --text-dim:      rgba(238,242,246,0.45);
+    --text-faint:    rgba(238,242,246,0.25);
+ 
+    --amber:         #d4af37;
+    --amber-dim:     rgba(212,175,55,0.18);
+    --cyan:          #4fd1e8;
+    --cyan-dim:      rgba(79,209,232,0.18);
+    --green:         #4ade80;
+    --green-dim:     rgba(74,222,128,0.16);
+    --red:           #f2555a;
+    --red-dim:       rgba(242,85,90,0.16);
+ 
+    --radius:        18px;
+    --radius-sm:     10px;
   }
-})();
-
-function setBootMsg(msg) { $("bootMsg").textContent = msg; }
-
-// ── Clock ──────────────────────────────────────────────────────
-function startClock() {
-  const tick = () => {
-    $("clock").textContent = new Date().toLocaleTimeString("en-GB", { hour12: false });
-  };
-  tick();
-  setInterval(tick, 1000);
-}
-
-function setConn(online) {
-  const el = $("conn");
-  el.classList.toggle("offline", !online);
-  $("connText").textContent = online ? "online" : "offline — queuing scans";
-}
-
-// ── Camera hardware ────────────────────────────────────────────
-async function startCamera() {
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
-    audio: false,
-  });
-  const video = $("video");
-  video.srcObject = stream;
-  await video.play();
-}
-
-function stopCamera() {
-  if (stream) {
-    stream.getTracks().forEach(t => t.stop());
-    stream = null;
+ 
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{
+    margin:0; padding:0;
+    width:100%; height:100%;
+    background:var(--bg);
+    color:var(--text);
+    font-family:'Space Grotesk',Arial,sans-serif;
+    overflow:hidden;
+    overscroll-behavior:none;
   }
-  $("video").srcObject = null;
-}
-
-// ── Roster ─────────────────────────────────────────────────────
-async function loadRoster() {
-  try {
-    const res = await fetch(CONFIG.API_URL + "?action=roster", { cache: "no-store" });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || "roster fetch failed");
-
-    roster = data.staff.map(s => ({
-      name: s.name,
-      embeddings: s.embeddings.map(e => new Float32Array(e)),
-    }));
-    localStorage.setItem(CONFIG.LOCAL_ROSTER_KEY, JSON.stringify(data.staff));
-    setConn(true);
-  } catch (err) {
-    console.warn("Roster refresh failed, using cache if available:", err.message);
-    const cached = localStorage.getItem(CONFIG.LOCAL_ROSTER_KEY);
-    if (cached && roster.length === 0) {
-      const parsed = JSON.parse(cached);
-      roster = parsed.map(s => ({
-        name: s.name,
-        embeddings: s.embeddings.map(e => new Float32Array(e)),
-      }));
-    }
-    setConn(false);
+  .mono{ font-family:'JetBrains Mono',monospace; }
+ 
+  #app{
+    position:fixed; inset:0;
+    display:flex; flex-direction:column;
+    height:100dvh;
   }
-}
-
-// ── Scan session lifecycle ─────────────────────────────────────
-// A "session" = camera on, actively looking for exactly one face.
-// The instant a face is found (matched or not), the session ends and
-// the camera shuts off. Nothing restarts it automatically — the next
-// person must tap the camera area or an action button.
-async function beginScanSession(type) {
-  if (cameraOn) return; // a session is already running
-
-  armedOverride = type;
-  if (type) {
-    $("armedNote").textContent = "Armed: " + scanTypeLabel(type) + " — scan a face now";
-  } else {
-    $("armedNote").innerHTML = "&nbsp;";
+ 
+  #topbar{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 18px;
+    background:var(--panel);
+    border-bottom:1px solid var(--panel-line);
+    flex-shrink:0;
+    z-index:5;
   }
-
-  try {
-    await startCamera();
-  } catch (err) {
-    setStatusText("Camera error: " + err.message);
-    return;
+  .brand{ display:flex; align-items:center; gap:10px; }
+  .brand-mark{
+    width:28px; height:28px; border-radius:8px;
+    background:linear-gradient(135deg,var(--amber),#f6d365);
+    display:flex; align-items:center; justify-content:center;
+    font-weight:700; font-size:13px; color:#1a1200;
   }
-
-  cameraOn = true;
-  setCamState("idle");
-  setStatusText("Position your face in frame");
-
-  clearTimeout(idleTimeoutTimer);
-  idleTimeoutTimer = setTimeout(() => {
-    if (cameraOn) endScanSession("No face detected — tap to try again.");
-  }, CONFIG.CAMERA_IDLE_TIMEOUT_MS);
-
-  detectTimer = setInterval(async () => {
-    if (detecting) return;
-    detecting = true;
-    try { await runDetection(); }
-    catch (err) { console.error("detection error", err); }
-    detecting = false;
-  }, CONFIG.DETECT_INTERVAL_MS);
-}
-
-function endScanSession(idleMsg) {
-  clearInterval(detectTimer);
-  detectTimer = null;
-  clearTimeout(idleTimeoutTimer);
-  stopCamera();
-  cameraOn = false;
-  disarmOverride();
-  $("resultCard").classList.remove("show");
-  goIdle(idleMsg || "Tap to scan");
-}
-
-function goIdle(msg) {
-  setCamState("idle");
-  setStatusText(msg);
-}
-
-async function runDetection() {
-  const video = $("video");
-  if (video.readyState < 2) return;
-
-  const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
-  const detection = await faceapi
-    .detectSingleFace(video, options)
-    .withFaceLandmarks()
-    .withFaceDescriptor();
-
-  if (!detection) return; // nobody in frame yet — keep the session running
-
-  // A face was found — stop looking immediately. Only one face is
-  // ever processed per session, by design.
-  clearInterval(detectTimer);
-  detectTimer = null;
-  clearTimeout(idleTimeoutTimer);
-
-  setCamState("detect");
-  setStatusText("Recognizing…");
-
-  const match = matchDescriptor(detection.descriptor);
-  if (match) {
-    confirmMatch(match.name, match.distance);
-  } else {
-    showUnknown();
+  .brand-name{ font-weight:700; font-size:14px; letter-spacing:1.5px; color:var(--amber); }
+  .brand-sub{ font-size:9px; color:var(--text-faint); letter-spacing:1px; margin-top:1px; }
+  #clock{ font-size:13px; color:var(--text-dim); letter-spacing:0.5px; }
+  #conn{
+    display:flex; align-items:center; gap:5px; font-size:9px; color:var(--text-faint);
+    letter-spacing:0.5px; margin-top:2px; justify-content:flex-end;
   }
-}
-
-function matchDescriptor(descriptor) {
-  let best = null;
-  for (const person of roster) {
-    for (const emb of person.embeddings) {
-      const dist = faceapi.euclideanDistance(descriptor, emb);
-      if (dist < CONFIG.MATCH_THRESHOLD && (!best || dist < best.distance)) {
-        best = { name: person.name, distance: dist };
-      }
-    }
+  #conn .dot{ width:6px; height:6px; border-radius:50%; background:var(--green); }
+  #conn.offline .dot{ background:var(--red); animation:blink 1.4s infinite; }
+  #conn.offline{ color:var(--red); }
+  @keyframes blink{ 0%,100%{opacity:1} 50%{opacity:0.25} }
+ 
+  #stage{
+    position:relative; flex:1;
+    display:flex; align-items:center; justify-content:center;
+    padding:22px; min-height:0;
   }
-  return best;
-}
-
-// ── Result handling ───────────────────────────────────────────
-function inferScanType() {
-  if (armedOverride) return armedOverride;
-  // default: treat as ordinary OT login/logout — backend infers
-  // login vs logout by time, same as the QR flow does today.
-  return "ot";
-}
-
-function scanTypeLabel(type) {
-  return {
-    ot:        "Login / Logout",
-    lunch_out: "Lunch Out",
-    lunch_in:  "Lunch In",
-    hd_entry:  "Half Day — Entry",
-    hd_exit:   "Half Day — Exit",
-  }[type] || type;
-}
-
-function confirmMatch(name, distance) {
-  const scanType = inferScanType();
-  setCamState("match");
-
-  const now = new Date();
-  const timeStr = now.toLocaleTimeString("en-GB", { hour12: false });
-
-  $("resultName").textContent = name;
-  $("resultMeta").innerHTML = `<b>⏰ ${timeStr}</b> &nbsp;·&nbsp; ${scanTypeLabel(scanType)}`;
-  const actionEl = $("resultAction");
-  actionEl.textContent = "✓ Recorded";
-  actionEl.style.background = "var(--green-dim)";
-  actionEl.style.color = "var(--green)";
-  $("resultCard").classList.add("show");
-  setStatusText("Matched");
-
-  queueScan({
-    name,
-    scanType: mapScanTypeForApi(scanType),
-    timestamp: now.toISOString(),
-  });
-
-  setTimeout(() => endScanSession(), CONFIG.CONFIRM_HOLD_MS);
-}
-
-function showUnknown() {
-  setCamState("unknown");
-  setStatusText("Face not recognized");
-  $("resultName").textContent = "Not recognized";
-  $("resultMeta").textContent = "Tap the camera to try again, or ask staff to enroll.";
-  const actionEl = $("resultAction");
-  actionEl.textContent = "✕ Not saved";
-  actionEl.style.background = "var(--red-dim)";
-  actionEl.style.color = "var(--red)";
-  $("resultCard").classList.add("show");
-
-  setTimeout(() => endScanSession(), CONFIG.CONFIRM_HOLD_MS);
-}
-
-function mapScanTypeForApi(type) {
-  // Backend only distinguishes: ot, lunch, hd_entry, hd_exit.
-  // Lunch direction (out vs in) is inferred server-side from whether
-  // it's the person's 1st or 2nd lunch scan today — same as QR flow.
-  if (type === "lunch_out" || type === "lunch_in") return "lunch";
-  return type; // ot, hd_entry, hd_exit pass through unchanged
-}
-
-function setCamState(state) {
-  const el = $("camWrap");
-  el.classList.remove("state-idle", "state-detect", "state-match", "state-unknown");
-  el.classList.add("state-" + state);
-}
-function setStatusText(txt) { $("statusText").textContent = txt; }
-
-// ── Action buttons (Lunch Out/In, Half Day In/Out) ─────────────
-// Any of these is also a valid "wake the camera up" tap. If the
-// camera is already on, pressing one just re-arms the type; pressing
-// the currently-armed one again cancels the session outright.
-document.querySelectorAll(".ovBtn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    const type = btn.dataset.type;
-
-    if (cameraOn) {
-      if (armedOverride === type) {
-        endScanSession();
-        return;
-      }
-      armedOverride = type;
-      document.querySelectorAll(".ovBtn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      $("armedNote").textContent = "Armed: " + scanTypeLabel(type) + " — scan a face now";
-      return;
-    }
-
-    document.querySelectorAll(".ovBtn").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    beginScanSession(type);
-  });
-});
-
-function disarmOverride() {
-  armedOverride = null;
-  document.querySelectorAll(".ovBtn").forEach(b => b.classList.remove("active"));
-  $("armedNote").innerHTML = "&nbsp;";
-}
-
-// ── Offline queue (for scan events) ───────────────────────────
-//
-//  - Every entry gets a unique id.
-//  - On success, only that ONE entry is removed, and it's removed by
-//    re-reading storage fresh at that moment — not by writing back a
-//    stale in-memory snapshot. A scan added WHILE a flush is in
-//    progress can never be silently wiped out.
-//  - A `flushing` lock stops two flush passes (e.g. the 15s timer and
-//    a just-queued scan) from running concurrently and double-sending.
-//  - The queue is capped at MAX_QUEUE_SIZE; if it's ever exceeded the
-//    oldest entry is dropped (with a visible warning).
-//  - A short dedupe window blocks queueing an exact repeat as an
-//    extra safety net.
-
-function getQueue() {
-  try { return JSON.parse(localStorage.getItem(CONFIG.LOCAL_QUEUE_KEY) || "[]"); }
-  catch { return []; }
-}
-
-function saveQueue(q) {
-  try {
-    localStorage.setItem(CONFIG.LOCAL_QUEUE_KEY, JSON.stringify(q));
-  } catch (err) {
-    console.error("Queue save failed:", err.message);
-    showToast("Local storage error — a scan may not have saved");
+  #camWrap{
+    position:relative; width:100%; max-width:520px; aspect-ratio:3/4;
+    border-radius:var(--radius); overflow:hidden; background:#000;
+    border:2px solid var(--panel-line);
+    transition:border-color 0.35s ease, box-shadow 0.35s ease;
   }
-  updateQueueBadge();
-}
-
-function updateQueueBadge() { $("queueCount").textContent = getQueue().length; }
-
-function makeScanId() {
-  return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
-}
-
-async function queueScan(entry) {
-  entry.id = makeScanId();
-
-  const q = getQueue();
-
-  const isDupe = q.some(e =>
-    e.name === entry.name &&
-    e.scanType === entry.scanType &&
-    Math.abs(new Date(e.timestamp) - new Date(entry.timestamp)) < CONFIG.DUPE_WINDOW_MS
-  );
-  if (isDupe) {
-    console.warn("Skipped duplicate queue entry for", entry.name);
-    return;
+  #camWrap.state-idle{    border-color:var(--amber-dim); }
+  #camWrap.state-detect{  border-color:var(--cyan);   box-shadow:0 0 0 3px var(--cyan-dim), 0 0 40px -8px var(--cyan); }
+  #camWrap.state-match{   border-color:var(--green);  box-shadow:0 0 0 3px var(--green-dim), 0 0 40px -8px var(--green); }
+  #camWrap.state-unknown{ border-color:var(--red);    box-shadow:0 0 0 3px var(--red-dim), 0 0 40px -8px var(--red); }
+ 
+  video{
+    position:absolute; inset:0; width:100%; height:100%;
+    object-fit:cover; transform:scaleX(-1);
   }
-
-  q.push(entry);
-
-  while (q.length > CONFIG.MAX_QUEUE_SIZE) {
-    const dropped = q.shift();
-    console.warn("Offline queue full — dropped oldest scan:", dropped);
-    showToast(`Offline queue full (${CONFIG.MAX_QUEUE_SIZE}) — oldest scan dropped`);
+  canvas#overlay{
+    position:absolute; inset:0; width:100%; height:100%;
+    transform:scaleX(-1); pointer-events:none;
   }
-
-  saveQueue(q);
-  flushQueue();
-}
-
-async function flushQueue() {
-  if (flushing) return;
-  if (!navigator.onLine) { setConn(false); return; }
-
-  const q = getQueue();
-  if (q.length === 0) return;
-
-  flushing = true;
-  let sentCount = 0;
-
-  try {
-    for (const entry of q) {
-      try {
-        const res = await fetch(CONFIG.API_URL, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain;charset=utf-8" }, // avoids CORS preflight on Apps Script
-          body: JSON.stringify({ action: "scan", ...entry }),
-        });
-        const rawText = await res.text();
-        let data;
-        try { data = JSON.parse(rawText); }
-        catch { throw new Error("Non-JSON response (status " + res.status + "): " + rawText.slice(0, 200)); }
-        if (!data.ok) throw new Error(data.error || "scan write failed");
-
-        // Remove only this entry, from whatever is currently in storage —
-        // never overwrite the whole queue with a stale snapshot.
-        const current = getQueue();
-        saveQueue(current.filter(e => e.id !== entry.id));
-        sentCount++;
-        setConn(true);
-      } catch (err) {
-        console.warn("Scan upload failed, will retry:", err.message);
-        showToast("Sync error: " + err.message);
-        // leave this entry exactly where it is in storage; try again next pass
-      }
-    }
-  } finally {
-    flushing = false;
+ 
+  #guideRing{
+    position:absolute; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    pointer-events:none;
   }
-
-  if (sentCount > 0) showToast(`Synced ${sentCount} pending scan(s)`);
-  updateQueueBadge();
-}
-
-// ── Toast ──────────────────────────────────────────────────────
-let toastTimer = null;
-function showToast(msg) {
-  const t = $("toast");
-  t.textContent = msg;
-  t.classList.add("show");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("show"), 3000);
-}
-
-// ── Enroll modal ───────────────────────────────────────────────
-// (unchanged — uses its own independent camera stream, unrelated to
-// the main scan session above)
-let enrollStream = null;
-let capturedDescriptors = [];
-
-$("enrollLink").addEventListener("click", openEnroll);
-$("enrollCancel").addEventListener("click", closeEnroll);
-$("enrollCapture").addEventListener("click", captureEnrollShot);
-
-async function openEnroll() {
-  $("enrollOverlay").classList.add("show");
-  $("enrollName").value = "";
-  capturedDescriptors = [];
-  updateEnrollDots();
-  $("enrollStatus").textContent = "";
-  $("enrollCapture").textContent = "Capture photo";
-  $("enrollCapture").disabled = false;
-  try {
-    enrollStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user", width: { ideal: 480 }, height: { ideal: 480 } },
-      audio: false,
-    });
-    $("enrollVideo").srcObject = enrollStream;
-    await $("enrollVideo").play();
-  } catch (err) {
-    $("enrollStatus").textContent = "Camera error: " + err.message;
+  #guideRing svg{ width:62%; opacity:0.35; }
+  #camWrap.state-match #guideRing, #camWrap.state-unknown #guideRing{ display:none; }
+ 
+  #statusPill{
+    position:absolute; top:14px; left:50%; transform:translateX(-50%);
+    padding:7px 16px; border-radius:999px;
+    background:rgba(10,14,20,0.72); backdrop-filter:blur(8px);
+    font-size:11px; font-weight:600; letter-spacing:0.8px;
+    color:var(--amber-); border:1px solid var(--panel-line);
+    display:flex; align-items:center; gap:7px; white-space:nowrap;
   }
-}
-
-function closeEnroll() {
-  $("enrollOverlay").classList.remove("show");
-  if (enrollStream) {
-    enrollStream.getTracks().forEach(t => t.stop());
-    enrollStream = null;
+  #statusPill .p-dot{ width:6px; height:6px; border-radius:50%; background:var(--amber); }
+  .state-detect  #statusPill .p-dot{ background:var(--cyan); animation:pulse 1s infinite; }
+  .state-match   #statusPill .p-dot{ background:var(--green); }
+  .state-unknown #statusPill .p-dot{ background:var(--red); }
+  @keyframes pulse{ 0%,100%{transform:scale(1); opacity:1;} 50%{transform:scale(1.6); opacity:0.5;} }
+ 
+  #resultCard{
+    position:absolute; left:0; right:0; bottom:0;
+    padding:20px 20px 24px;
+    background:linear-gradient(0deg, rgba(6,8,11,0.94) 0%, rgba(6,8,11,0.75) 70%, transparent 100%);
+    transform:translateY(100%);
+    transition:transform 0.4s cubic-bezier(.2,.9,.25,1);
   }
-}
-
-function updateEnrollDots() {
-  document.querySelectorAll(".capDot").forEach((d, i) => {
-    d.classList.toggle("done", i < capturedDescriptors.length);
-  });
-}
-
-async function captureEnrollShot() {
-  const name = $("enrollName").value.trim();
-  if (!name) {
-    $("enrollStatus").textContent = "Enter the staff member's name first.";
-    return;
+  #resultCard.show{ transform:translateY(0); }
+  #resultName{ font-size:26px; font-weight:700; line-height:1.15; margin-bottom:4px; }
+  #resultMeta{ font-size:12px; color:var(--text-dim); }
+  #resultMeta b{ color:inherit; font-weight:600; }
+  #resultAction{
+    display:inline-block; margin-top:9px;
+    padding:5px 12px; border-radius:7px;
+    font-size:11px; font-weight:600; letter-spacing:0.4px;
   }
-
-  $("enrollCapture").disabled = true;
-  $("enrollStatus").textContent = "Capturing…";
-
-  const video = $("enrollVideo");
-  const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
-  const detection = await faceapi
-    .detectSingleFace(video, options)
-    .withFaceLandmarks()
-    .withFaceDescriptor();
-
-  $("enrollCapture").disabled = false;
-
-  if (!detection) {
-    $("enrollStatus").textContent = "No face detected — try again, ensure good lighting.";
-    return;
+ 
+  #overrideBar{
+    flex-shrink:0;
+    padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+    background:var(--panel);
+    border-top:1px solid var(--panel-line);
   }
-
-  capturedDescriptors.push(Array.from(detection.descriptor));
-  updateEnrollDots();
-
-  if (capturedDescriptors.length >= CONFIG.ENROLL_SHOTS) {
-    $("enrollStatus").textContent = "Saving to roster…";
-    $("enrollCapture").textContent = "Capture photo";
-    await submitEnrollment(name, capturedDescriptors);
-  } else {
-    $("enrollStatus").textContent = `${capturedDescriptors.length}/${CONFIG.ENROLL_SHOTS} captured — change angle slightly, capture again.`;
+  #overrideLabel{
+    font-size:9px; letter-spacing:1.4px; text-transform:uppercase;
+    color:var(--text-faint); margin-bottom:9px; text-align:center;
   }
-}
-
-async function submitEnrollment(name, embeddings) {
-  try {
-    const res = await fetch(CONFIG.API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: "enroll", name, embeddings }),
-    });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || "enroll failed");
-
-    $("enrollStatus").textContent = data.knownInPersonSheet
-      ? "✓ Enrolled successfully."
-      : "✓ Enrolled — note: name not found in Person Name sheet, add it there too.";
-    await loadRoster();
-    setTimeout(closeEnroll, 1600);
-  } catch (err) {
-    $("enrollStatus").textContent = "Save failed: " + err.message + " — will not retry automatically, try again.";
+  #overrideGrid{
+    display:grid; grid-template-columns:repeat(4,1fr); gap:8px;
   }
-}
+  .ovBtn{
+    appearance:none; border:1px solid var(--panel-line);
+    background:rgba(255,255,255,0.03); color:var(--text);
+    border-radius:var(--radius-sm); padding:12px 4px 10px;
+    display:flex; flex-direction:column; align-items:center; gap:5px;
+    font-family:inherit; font-size:10.5px; font-weight:600; letter-spacing:0.3px;
+    cursor:pointer; transition:all 0.15s ease;
+  }
+  .ovBtn .ico{ font-size:18px; line-height:1; }
+  .ovBtn:active{ transform:scale(0.95); }
+  .ovBtn.active{ background:var(--amber-dim); border-color:var(--amber); color:var(--amber); }
+  .ovBtn.active .ico{ filter:drop-shadow(0 0 6px var(--amber)); }
+ 
+  #armedNote{
+    text-align:center; font-size:10.5px; color:var(--amber);
+    margin-top:9px; min-height:14px; letter-spacing:0.3px;
+  }
+ 
+  #utilRow{ display:flex; justify-content:center; gap:18px; margin-top:10px; }
+  .utilLink{
+    background:none; border:none; color:var(--text-faint);
+    font-family:inherit; font-size:10px; letter-spacing:0.5px;
+    cursor:pointer; padding:4px;
+  }
+  .utilLink:active{ color:var(--text-dim); }
+ 
+  #toast{
+    position:fixed; left:50%; top:16px; transform:translate(-50%,-140%);
+    background:var(--panel); border:1px solid var(--amber-dim);
+    padding:16px 22px; border-radius:14px;
+    font-size:15px; font-weight:600; letter-spacing:0.2px; line-height:1.35;
+    z-index:50;
+    box-shadow:0 8px 30px -6px rgba(0,0,0,0.5);
+    transition:transform 0.3s ease;
+    max-width:92%; text-align:center;
+  }
+  #toast.show{ transform:translate(-50%,0); }
+ 
+  #enrollOverlay{
+    position:fixed; inset:0; z-index:40;
+    background:rgba(4,6,9,0.9); backdrop-filter:blur(6px);
+    display:none; align-items:flex-end; justify-content:center;
+  }
+  #enrollOverlay.show{ display:flex; }
+  #enrollSheet{
+    width:100%; max-width:520px; background:var(--panel);
+    border-radius:20px 20px 0 0;
+    border:1px solid var(--panel-line); border-bottom:none;
+    padding:20px 20px calc(20px + env(safe-area-inset-bottom));
+    max-height:88vh; overflow-y:auto;
+  }
+  #enrollSheet h2{ margin:0 0 3px; font-size:17px; font-weight:700; color:var(--amber); }
+  #enrollSheet .hint{ font-size:11.5px; color:var(--text-dim); margin-bottom:16px; }
+  #enrollSheet label{ font-size:10px; letter-spacing:0.8px; text-transform:uppercase; color:var(--text-faint); }
+  #enrollName{
+    width:100%; margin-top:6px; margin-bottom:16px;
+    background:rgba(255,255,255,0.04); border:1px solid var(--panel-line);
+    color:var(--text); font-family:inherit; font-size:15px;
+    padding:11px 12px; border-radius:10px;
+  }
+  #enrollCamWrap{
+    position:relative; width:100%; aspect-ratio:1/1; max-width:280px; margin:0 auto 14px;
+    border-radius:14px; overflow:hidden; background:#000;
+    border:2px solid var(--panel-line);
+  }
+  #enrollVideo{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+  #enrollProgress{ display:flex; gap:6px; justify-content:center; margin-bottom:14px; }
+  .capDot{ width:9px; height:9px; border-radius:50%; background:rgba(255,255,255,0.12); border:1px solid var(--panel-line); }
+  .capDot.done{ background:var(--green); border-color:var(--green); }
+  #enrollActions{ display:flex; gap:10px; }
+  .btn{
+    flex:1; border:none; border-radius:12px; padding:13px;
+    font-family:inherit; font-weight:600; font-size:13px;
+    cursor:pointer;
+  }
+  .btn-primary{ background:var(--amber); color:#1a1200; }
+  .btn-ghost{ background:rgba(255,255,255,0.05); color:var(--text-dim); }
+  .btn:disabled{ opacity:0.4; }
+  #enrollStatus{ font-size:11.5px; text-align:center; margin-top:12px; min-height:16px; color:var(--text-dim); }
+ 
+  #boot{
+    position:fixed; inset:0; z-index:60;
+    background:var(--bg); display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:14px;
+  }
+  #boot.hide{ display:none; }
+  .spinner{
+    width:34px; height:34px; border-radius:50%;
+    border:3px solid var(--panel-line); border-top-color:var(--amber);
+    animation:spin 0.9s linear infinite;
+  }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+  #bootMsg{ font-size:12px; color:var(--text-dim); letter-spacing:0.4px; }
+</style>
+</head>
+<body>
+ 
+<div id="boot">
+  <div class="spinner"></div>
+  <div id="bootMsg">Loading recognition models…</div>
+</div>
+ 
+<div id="app">
+ 
+  <div id="topbar">
+    <div class="brand">
+      <div class="brand-mark">O</div>
+      <div>
+        <div class="brand-name">OMIOR</div>
+        <div class="brand-sub">GATE SCAN</div>
+      </div>
+    </div>
+    <div>
+      <div id="clock" class="mono">--:--:--</div>
+      <div id="conn"><span class="dot"></span><span id="connText">online</span></div>
+    </div>
+  </div>
+ 
+  <div id="stage">
+    <div id="camWrap" class="state-idle">
+      <video id="video" autoplay muted playsinline></video>
+      <canvas id="overlay"></canvas>
+ 
+      <div id="guideRing">
+        <svg viewBox="0 0 200 240" fill="none">
+          <ellipse cx="100" cy="110" rx="78" ry="98" stroke="#d4af37" stroke-width="2.5" stroke-dasharray="6 8"/>
+        </svg>
+      </div>
+ 
+      <div id="statusPill"><span class="p-dot"></span><span id="statusText">Select an action to begin</span></div>
+ 
+      <div id="resultCard">
+        <div id="resultName">—</div>
+        <div id="resultMeta"></div>
+        <div id="resultAction"></div>
+      </div>
+    </div>
+  </div>
+ 
+  <div id="overrideBar">
+    <div id="overrideLabel">Select an action — camera opens after you tap</div>
+    <div id="overrideGrid">
+      <button class="ovBtn" data-type="ot"><span class="ico">🕐</span>Overtime</button>
+      <button class="ovBtn" data-type="lunch"><span class="ico">🍽️</span>Lunch</button>
+      <button class="ovBtn" data-type="hd_entry"><span class="ico">📋</span>Half Day Entry</button>
+      <button class="ovBtn" data-type="hd_exit"><span class="ico">📋</span>Half Day Exit</button>
+    </div>
+    <div id="armedNote">&nbsp;</div>
+    <div id="utilRow">
+      <button class="utilLink" id="enrollLink">+ Enroll new staff</button>
+      <button class="utilLink" id="queueLink">Pending sync: <span id="queueCount">0</span></button>
+    </div>
+  </div>
+ 
+</div>
+ 
+<div id="toast"></div>
+ 
+<div id="enrollOverlay">
+  <div id="enrollSheet">
+    <h2>Enroll new staff</h2>
+    <div class="hint">Capture 5 photos at slightly different angles for reliable matching.</div>
+ 
+    <label for="enrollName">Staff name</label>
+    <input id="enrollName" type="text" placeholder="Exactly as in Person Name sheet" autocomplete="off">
+ 
+    <div id="enrollCamWrap">
+      <video id="enrollVideo" autoplay muted playsinline></video>
+    </div>
+ 
+    <div id="enrollProgress">
+      <div class="capDot" data-i="0"></div>
+      <div class="capDot" data-i="1"></div>
+      <div class="capDot" data-i="2"></div>
+      <div class="capDot" data-i="3"></div>
+      <div class="capDot" data-i="4"></div>
+    </div>
+ 
+    <div id="enrollActions">
+      <button class="btn btn-ghost" id="enrollCancel">Cancel</button>
+      <button class="btn btn-primary" id="enrollCapture">Capture photo</button>
+    </div>
+    <div id="enrollStatus">&nbsp;</div>
+  </div>
+</div>
+ 
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
